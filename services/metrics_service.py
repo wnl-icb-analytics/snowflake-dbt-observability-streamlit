@@ -7,38 +7,19 @@ from config import ELEMENTARY_SCHEMA, DEFAULT_LOOKBACK_DAYS
 def get_dashboard_kpis(days: int = DEFAULT_LOOKBACK_DAYS):
     """Get main dashboard KPIs in a single query."""
     query = f"""
-    WITH test_base AS (
-        SELECT
-            test_unique_id,
-            table_name,
-            status,
-            detected_at
-        FROM {ELEMENTARY_SCHEMA}.elementary_test_results
-        WHERE detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-    ),
-    test_latest AS (
-        SELECT
-            table_name,
-            status,
-            ROW_NUMBER() OVER (PARTITION BY test_unique_id ORDER BY detected_at DESC) as rn
-        FROM test_base
-    ),
-    active_test_areas AS (
-        SELECT COUNT(DISTINCT table_name) as failed_tests
-        FROM test_latest
-        WHERE rn = 1
-        AND status IN ('fail', 'error')
-        AND table_name IS NOT NULL
-    ),
-    model_base AS (
+    WITH model_all AS (
         SELECT
             name,
             status,
             execution_time,
             generated_at
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results
+        WHERE resource_type = 'model'
+    ),
+    model_window AS (
+        SELECT *
+        FROM model_all
         WHERE generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-        AND resource_type = 'model'
     ),
     model_latest AS (
         SELECT
@@ -46,13 +27,91 @@ def get_dashboard_kpis(days: int = DEFAULT_LOOKBACK_DAYS):
             status,
             execution_time,
             ROW_NUMBER() OVER (PARTITION BY name ORDER BY generated_at DESC) as rn
-        FROM model_base
+        FROM model_all
+    ),
+    model_last_success AS (
+        SELECT
+            name,
+            MAX(generated_at) as last_success_at
+        FROM model_all
+        WHERE status = 'success'
+        GROUP BY name
+    ),
+    model_window_agg AS (
+        SELECT
+            name,
+            COUNT_IF(status IN ('fail', 'error')) as failure_count
+        FROM model_window
+        GROUP BY name
     ),
     active_models AS (
-        SELECT COUNT(DISTINCT name) as failed_models
-        FROM model_latest
-        WHERE rn = 1
-        AND status IN ('fail', 'error')
+        SELECT COUNT(*) as failed_models
+        FROM (
+            SELECT
+                m.name
+            FROM model_all m
+            LEFT JOIN model_last_success s ON m.name = s.name
+            LEFT JOIN model_window_agg w ON m.name = w.name
+            JOIN model_latest l ON m.name = l.name AND l.rn = 1
+            WHERE l.status IN ('fail', 'error')
+            GROUP BY m.name, s.last_success_at, w.failure_count
+            HAVING COALESCE(w.failure_count, 0) > 0
+        )
+    ),
+    test_all AS (
+        SELECT
+            r.table_name,
+            COALESCE(
+                REGEXP_REPLACE(r.test_unique_id, '^test\\.[^.]+\\.', ''),
+                CONCAT(COALESCE(r.table_name, ''), '||', COALESCE(COALESCE(t.short_name, r.test_name), ''))
+            ) as logical_test_key,
+            r.status,
+            r.detected_at
+        FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
+        LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
+        WHERE r.table_name IS NOT NULL
+    ),
+    test_window AS (
+        SELECT *
+        FROM test_all
+        WHERE detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    ),
+    test_latest AS (
+        SELECT
+            table_name,
+            logical_test_key,
+            status,
+            ROW_NUMBER() OVER (PARTITION BY logical_test_key ORDER BY detected_at DESC) as rn
+        FROM test_all
+    ),
+    test_last_pass AS (
+        SELECT
+            logical_test_key,
+            MAX(detected_at) as last_pass_at
+        FROM test_all
+        WHERE status = 'pass'
+        GROUP BY logical_test_key
+    ),
+    test_window_agg AS (
+        SELECT
+            table_name,
+            logical_test_key,
+            COUNT_IF(status IN ('fail', 'error')) as failure_count
+        FROM test_window
+        GROUP BY table_name, logical_test_key
+    ),
+    active_test_areas AS (
+        SELECT COUNT(DISTINCT table_name) as failed_tests
+        FROM (
+            SELECT
+                w.table_name,
+                w.logical_test_key
+            FROM test_window_agg w
+            JOIN test_latest l ON w.logical_test_key = l.logical_test_key AND l.rn = 1
+            LEFT JOIN test_last_pass p ON w.logical_test_key = p.logical_test_key
+            WHERE w.failure_count > 0
+              AND l.status <> 'pass'
+        )
     ),
     last_run AS (
         SELECT MAX(generated_at) as last_run_time
@@ -61,9 +120,9 @@ def get_dashboard_kpis(days: int = DEFAULT_LOOKBACK_DAYS):
     )
     SELECT
         (SELECT failed_tests FROM active_test_areas) as failed_tests,
-        (SELECT COUNT(DISTINCT test_unique_id) FROM test_base) as total_tests_run,
+        (SELECT COUNT(DISTINCT logical_test_key) FROM test_window) as total_tests_run,
         (SELECT failed_models FROM active_models) as failed_models,
-        (SELECT COUNT(DISTINCT name) FROM model_base) as total_models_run,
+        (SELECT COUNT(DISTINCT name) FROM model_window) as total_models_run,
         (SELECT AVG(execution_time) FROM model_latest WHERE rn = 1) as avg_execution_time,
         (SELECT last_run_time FROM last_run) as last_run_time
     """

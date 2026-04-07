@@ -129,7 +129,7 @@ def _render_current_issues(days: int):
     display_df["STATUS_LABEL"] = display_df["CURRENT_STATUS"].map(_format_issue_status)
     display_df["SUMMARY"] = display_df.apply(_summarize_issue, axis=1)
     display_df["FIRST_SEEN"] = display_df["FIRST_ISSUE_AT"].map(_format_relative_time)
-    display_df["LAST_SEEN"] = display_df["LAST_ISSUE_AT"].map(_format_timestamp)
+    display_df["LAST_SEEN"] = display_df["LAST_ISSUE_AT"].map(_format_relative_time)
 
     display_df = display_df.rename(
         columns={
@@ -137,7 +137,7 @@ def _render_current_issues(days: int):
             "ISSUE_TYPE": "Type",
             "STATUS_LABEL": "Status",
             "FAILURE_COUNT": f"Failures ({days}d)",
-            "FIRST_SEEN": "First Seen",
+            "FIRST_SEEN": "Streak Started",
             "LAST_SEEN": "Last Seen",
             "SUMMARY": "Summary",
         }
