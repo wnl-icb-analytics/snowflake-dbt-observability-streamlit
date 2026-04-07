@@ -7,23 +7,52 @@ from config import ELEMENTARY_SCHEMA, DEFAULT_LOOKBACK_DAYS
 def get_dashboard_kpis(days: int = DEFAULT_LOOKBACK_DAYS):
     """Get main dashboard KPIs in a single query."""
     query = f"""
-    WITH test_ranked AS (
+    WITH test_base AS (
         SELECT
             test_unique_id,
+            table_name,
             status,
-            ROW_NUMBER() OVER (PARTITION BY test_unique_id ORDER BY detected_at DESC) as rn
+            detected_at
         FROM {ELEMENTARY_SCHEMA}.elementary_test_results
         WHERE detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
     ),
-    model_ranked AS (
+    test_latest AS (
         SELECT
-            unique_id,
+            table_name,
+            status,
+            ROW_NUMBER() OVER (PARTITION BY test_unique_id ORDER BY detected_at DESC) as rn
+        FROM test_base
+    ),
+    active_test_areas AS (
+        SELECT COUNT(DISTINCT table_name) as failed_tests
+        FROM test_latest
+        WHERE rn = 1
+        AND status IN ('fail', 'error')
+        AND table_name IS NOT NULL
+    ),
+    model_base AS (
+        SELECT
+            name,
             status,
             execution_time,
-            ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY generated_at DESC) as rn
+            generated_at
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results
         WHERE generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
         AND resource_type = 'model'
+    ),
+    model_latest AS (
+        SELECT
+            name,
+            status,
+            execution_time,
+            ROW_NUMBER() OVER (PARTITION BY name ORDER BY generated_at DESC) as rn
+        FROM model_base
+    ),
+    active_models AS (
+        SELECT COUNT(DISTINCT name) as failed_models
+        FROM model_latest
+        WHERE rn = 1
+        AND status IN ('fail', 'error')
     ),
     last_run AS (
         SELECT MAX(generated_at) as last_run_time
@@ -31,11 +60,11 @@ def get_dashboard_kpis(days: int = DEFAULT_LOOKBACK_DAYS):
         WHERE generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
     )
     SELECT
-        (SELECT COUNT(*) FROM test_ranked WHERE rn = 1 AND status IN ('fail', 'error')) as failed_tests,
-        (SELECT COUNT(*) FROM test_ranked WHERE rn = 1) as total_tests_run,
-        (SELECT COUNT(*) FROM model_ranked WHERE rn = 1 AND status IN ('fail', 'error')) as failed_models,
-        (SELECT COUNT(*) FROM model_ranked WHERE rn = 1) as total_models_run,
-        (SELECT AVG(execution_time) FROM model_ranked WHERE rn = 1) as avg_execution_time,
+        (SELECT failed_tests FROM active_test_areas) as failed_tests,
+        (SELECT COUNT(DISTINCT test_unique_id) FROM test_base) as total_tests_run,
+        (SELECT failed_models FROM active_models) as failed_models,
+        (SELECT COUNT(DISTINCT name) FROM model_base) as total_models_run,
+        (SELECT AVG(execution_time) FROM model_latest WHERE rn = 1) as avg_execution_time,
         (SELECT last_run_time FROM last_run) as last_run_time
     """
     return run_query(query)

@@ -228,17 +228,32 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         FROM model_base
         QUALIFY ROW_NUMBER() OVER (PARTITION BY object_name ORDER BY event_at DESC) = 1
     ),
-    model_agg AS (
+    model_last_success AS (
         SELECT
             object_name,
-            issue_type,
-            COUNT_IF(status IN ('fail', 'error')) as failure_count,
-            COUNT(*) as total_runs,
-            MIN(CASE WHEN status IN ('fail', 'error') THEN event_at END) as first_issue_at,
-            MAX(CASE WHEN status IN ('fail', 'error') THEN event_at END) as last_issue_at,
-            ANY_VALUE(message) as sample_message
+            MAX(event_at) as last_success_at
         FROM model_base
-        GROUP BY object_name, issue_type
+        WHERE status = 'success'
+        GROUP BY object_name
+    ),
+    model_agg AS (
+        SELECT
+            b.object_name,
+            b.issue_type,
+            COUNT_IF(b.status IN ('fail', 'error')) as failure_count,
+            COUNT(*) as total_runs,
+            MIN(
+                CASE
+                    WHEN b.status IN ('fail', 'error')
+                     AND b.event_at > COALESCE(s.last_success_at, TO_TIMESTAMP('1970-01-01'))
+                    THEN b.event_at
+                END
+            ) as first_issue_at,
+            MAX(CASE WHEN b.status IN ('fail', 'error') THEN b.event_at END) as last_issue_at,
+            ANY_VALUE(b.message) as sample_message
+        FROM model_base b
+        LEFT JOIN model_last_success s ON b.object_name = s.object_name
+        GROUP BY b.object_name, b.issue_type
     ),
     test_base AS (
         SELECT
@@ -261,18 +276,36 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         FROM test_base
         QUALIFY ROW_NUMBER() OVER (PARTITION BY test_unique_id ORDER BY event_at DESC) = 1
     ),
-    test_agg_per_check AS (
+    test_last_pass AS (
         SELECT
             object_name,
-            issue_type,
             test_unique_id,
-            ANY_VALUE(test_name) as test_name,
-            COUNT_IF(status IN ('fail', 'error')) as failure_count,
-            COUNT(*) as total_runs,
-            MIN(CASE WHEN status IN ('fail', 'error') THEN event_at END) as first_issue_at,
-            MAX(CASE WHEN status IN ('fail', 'error') THEN event_at END) as last_issue_at
+            MAX(event_at) as last_pass_at
         FROM test_base
-        GROUP BY object_name, issue_type, test_unique_id
+        WHERE status = 'pass'
+        GROUP BY object_name, test_unique_id
+    ),
+    test_agg_per_check AS (
+        SELECT
+            b.object_name,
+            b.issue_type,
+            b.test_unique_id,
+            ANY_VALUE(b.test_name) as test_name,
+            COUNT_IF(b.status IN ('fail', 'error')) as failure_count,
+            COUNT(*) as total_runs,
+            MIN(
+                CASE
+                    WHEN b.status <> 'pass'
+                     AND b.event_at > COALESCE(p.last_pass_at, TO_TIMESTAMP('1970-01-01'))
+                    THEN b.event_at
+                END
+            ) as first_issue_at,
+            MAX(CASE WHEN b.status IN ('fail', 'error') THEN b.event_at END) as last_issue_at
+        FROM test_base b
+        LEFT JOIN test_last_pass p
+            ON b.object_name = p.object_name
+           AND b.test_unique_id = p.test_unique_id
+        GROUP BY b.object_name, b.issue_type, b.test_unique_id
     ),
     test_filtered AS (
         SELECT
