@@ -1,8 +1,10 @@
 """Home page - Overview dashboard with KPIs."""
 
 import os
+import pandas as pd
 import streamlit as st
 from services.metrics_service import get_dashboard_kpis, get_recent_runs, get_top_failures, get_project_totals, get_total_execution_time
+from services.alerts_service import get_current_issue_summary, get_latest_run_issues
 
 DBT_LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "dbt-logo.svg")
 
@@ -77,6 +79,109 @@ def _format_duration(seconds) -> str:
         return f"{seconds}s"
 
 
+def _format_issue_status(status: str) -> str:
+    """Format issue status for display."""
+    status = (status or "").lower()
+    if status in ("fail", "error"):
+        return "Failing"
+    if status == "skipped":
+        return "Skipped"
+    if status == "warn":
+        return "Warn"
+    return status.title() if status else "Unknown"
+
+
+def _summarize_issue(row) -> str:
+    """Build a short human-readable summary for the current issue table."""
+    issue_type = row["ISSUE_TYPE"]
+    failure_count = int(row["FAILURE_COUNT"] or 0)
+    affected_checks = row.get("AFFECTED_CHECKS")
+    sample_message = row.get("SAMPLE_MESSAGE") or ""
+
+    if issue_type == "Model":
+        message = str(sample_message).replace("\n", " ")
+        if "invalid identifier" in message.lower():
+            return "Compilation error from an invalid identifier."
+        if "does not exist or not authorized" in message.lower():
+            return "Source object is missing or not accessible."
+        if "out of sync" in message.lower() or "on_schema_change" in message.lower():
+            return "Incremental schema drift between source and target."
+        if message:
+            return _truncate(message, 70)
+        return f"{failure_count} model failures in range."
+
+    checks_text = f"{int(affected_checks)} checks affected" if pd.notna(affected_checks) else "Test failures present"
+    return f"{checks_text}; {failure_count} failures in range."
+
+
+def _render_current_issues(days: int):
+    """Render compact open/recurring issues summary table."""
+    issues_df = get_current_issue_summary(days)
+
+    st.subheader("Open Or Recurring Issues")
+    st.caption("Active model failures and unresolved test areas across the selected time range.")
+
+    if issues_df.empty:
+        st.success("No open or recurring issues")
+        return
+
+    display_df = issues_df.copy()
+    display_df["STATUS_LABEL"] = display_df["CURRENT_STATUS"].map(_format_issue_status)
+    display_df["SUMMARY"] = display_df.apply(_summarize_issue, axis=1)
+    display_df["LAST_SEEN"] = display_df["LAST_ISSUE_AT"].map(_format_timestamp)
+
+    display_df = display_df.rename(
+        columns={
+            "OBJECT_NAME": "Object",
+            "ISSUE_TYPE": "Type",
+            "STATUS_LABEL": "Status",
+            "FAILURE_COUNT": f"Failures ({days}d)",
+            "LAST_SEEN": "Last Seen",
+            "SUMMARY": "Summary",
+        }
+    )
+
+    st.dataframe(
+        display_df[["Object", "Type", "Status", f"Failures ({days}d)", "Last Seen", "Summary"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def _render_latest_run_issues():
+    """Render issues from the most recent invocation."""
+    latest_df = get_latest_run_issues()
+
+    st.subheader("Latest Run Issues")
+    st.caption("Failures and warnings from the most recent dbt invocation only.")
+
+    if latest_df.empty:
+        st.success("Latest run completed without failures or warnings")
+        return
+
+    display_df = latest_df.copy()
+    display_df["STATUS_LABEL"] = display_df["CURRENT_STATUS"].map(_format_issue_status)
+    display_df["EVENT_AT"] = display_df["EVENT_AT"].map(_format_timestamp)
+    display_df["SUMMARY"] = display_df["SUMMARY"].fillna("").map(lambda x: _truncate(str(x).replace("\n", " "), 90))
+
+    display_df = display_df.rename(
+        columns={
+            "OBJECT_NAME": "Object",
+            "ISSUE_TYPE": "Type",
+            "STATUS_LABEL": "Status",
+            "ISSUE_COUNT": "Count",
+            "EVENT_AT": "Run Time",
+            "SUMMARY": "Summary",
+        }
+    )
+
+    st.dataframe(
+        display_df[["Object", "Type", "Status", "Count", "Run Time", "Summary"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 
 def render(search_filter: str = ""):
     # Title with dbt logo and time range selector
@@ -145,6 +250,14 @@ def render(search_filter: str = ""):
             st.metric(f"Runtime ({time_range}d)", "N/A")
     with cols[5]:
         st.metric("Last Run", _format_relative_time(row["LAST_RUN_TIME"]))
+
+    st.divider()
+
+    _render_latest_run_issues()
+
+    st.divider()
+
+    _render_current_issues(time_range)
 
     st.divider()
 
@@ -244,4 +357,3 @@ def render(search_filter: str = ""):
                         if st.button("View", key=f"home_run_{invocation_id}"):
                             st.session_state["selected_invocation"] = invocation_id
                             st.rerun()
-

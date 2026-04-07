@@ -78,6 +78,24 @@ def get_test_run_history(test_unique_id: str, days: int = DEFAULT_LOOKBACK_DAYS)
     return run_query(query)
 
 
+def get_test_run_history_ascending(test_unique_id: str, days: int = DEFAULT_LOOKBACK_DAYS):
+    """Get run history for a specific test in chronological order."""
+    query = f"""
+    SELECT
+        test_unique_id,
+        test_name,
+        status,
+        detected_at,
+        test_results_description,
+        test_results_query
+    FROM {ELEMENTARY_SCHEMA}.elementary_test_results
+    WHERE test_unique_id = '{test_unique_id}'
+    AND detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    ORDER BY detected_at ASC
+    """
+    return run_query(query)
+
+
 def get_models_without_tests():
     """Get models that have no associated tests."""
     query = f"""

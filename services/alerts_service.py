@@ -188,3 +188,205 @@ def get_historical_alert_counts(days: int = DEFAULT_LOOKBACK_DAYS):
          AND status IN ('fail', 'error')) as failed_models
     """
     return run_query(query)
+
+
+def get_project_test_status_history(days: int = DEFAULT_LOOKBACK_DAYS):
+    """Get project-wide test status history for trend and resolution analysis."""
+    query = f"""
+    SELECT
+        r.test_unique_id,
+        COALESCE(t.short_name, r.test_name) as short_name,
+        r.table_name,
+        r.status,
+        r.detected_at
+    FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
+    LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
+    WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    ORDER BY r.test_unique_id, r.detected_at ASC
+    """
+    return run_query(query)
+
+
+def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
+    """Get combined current model and test issues for homepage summary."""
+    query = f"""
+    WITH model_base AS (
+        SELECT
+            r.name as object_name,
+            'Model' as issue_type,
+            r.status,
+            r.generated_at as event_at,
+            r.message
+        FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
+        WHERE r.resource_type = 'model'
+        AND r.generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    ),
+    model_latest AS (
+        SELECT
+            object_name,
+            status as current_status
+        FROM model_base
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY object_name ORDER BY event_at DESC) = 1
+    ),
+    model_agg AS (
+        SELECT
+            object_name,
+            issue_type,
+            COUNT_IF(status IN ('fail', 'error')) as failure_count,
+            COUNT(*) as total_runs,
+            MIN(CASE WHEN status IN ('fail', 'error') THEN event_at END) as first_issue_at,
+            MAX(CASE WHEN status IN ('fail', 'error') THEN event_at END) as last_issue_at,
+            ANY_VALUE(message) as sample_message
+        FROM model_base
+        GROUP BY object_name, issue_type
+    ),
+    test_base AS (
+        SELECT
+            r.table_name as object_name,
+            'Test Area' as issue_type,
+            r.test_unique_id,
+            r.status,
+            r.detected_at as event_at,
+            COALESCE(t.short_name, r.test_name) as test_name
+        FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
+        LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
+        WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+        AND r.table_name IS NOT NULL
+    ),
+    test_latest AS (
+        SELECT
+            object_name,
+            test_unique_id,
+            status as current_status
+        FROM test_base
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY test_unique_id ORDER BY event_at DESC) = 1
+    ),
+    test_agg_per_check AS (
+        SELECT
+            object_name,
+            issue_type,
+            test_unique_id,
+            ANY_VALUE(test_name) as test_name,
+            COUNT_IF(status IN ('fail', 'error')) as failure_count,
+            COUNT(*) as total_runs,
+            MIN(CASE WHEN status IN ('fail', 'error') THEN event_at END) as first_issue_at,
+            MAX(CASE WHEN status IN ('fail', 'error') THEN event_at END) as last_issue_at
+        FROM test_base
+        GROUP BY object_name, issue_type, test_unique_id
+    ),
+    test_filtered AS (
+        SELECT
+            a.object_name,
+            a.issue_type,
+            a.test_unique_id,
+            a.test_name,
+            a.failure_count,
+            a.total_runs,
+            a.first_issue_at,
+            a.last_issue_at,
+            l.current_status
+        FROM test_agg_per_check a
+        JOIN test_latest l
+            ON a.object_name = l.object_name
+           AND a.test_unique_id = l.test_unique_id
+        WHERE a.failure_count > 0
+          AND l.current_status <> 'pass'
+          AND NOT (a.failure_count = 1 AND l.current_status = 'pass')
+    ),
+    test_agg AS (
+        SELECT
+            object_name,
+            issue_type,
+            SUM(failure_count) as failure_count,
+            COUNT(*) as affected_checks,
+            COUNT_IF(current_status IN ('fail', 'error')) as currently_failing_checks,
+            MIN(first_issue_at) as first_issue_at,
+            MAX(last_issue_at) as last_issue_at,
+            ANY_VALUE(test_name) as sample_message
+        FROM test_filtered
+        GROUP BY object_name, issue_type
+    )
+    SELECT
+        a.object_name,
+        a.issue_type,
+        l.current_status,
+        a.failure_count,
+        a.total_runs,
+        NULL as affected_checks,
+        a.first_issue_at,
+        a.last_issue_at,
+        a.sample_message
+    FROM model_agg a
+    JOIN model_latest l USING (object_name)
+    WHERE l.current_status IN ('fail', 'error')
+      AND a.failure_count > 0
+
+    UNION ALL
+
+    SELECT
+        object_name,
+        issue_type,
+        CASE
+            WHEN currently_failing_checks > 0 THEN 'fail'
+            ELSE 'skipped'
+        END as current_status,
+        failure_count,
+        NULL as total_runs,
+        affected_checks,
+        first_issue_at,
+        last_issue_at,
+        sample_message
+    FROM test_agg
+    ORDER BY failure_count DESC, last_issue_at DESC
+    """
+    return run_query(query)
+
+
+def get_latest_run_issues():
+    """Get model/test issues from the most recent invocation only."""
+    query = f"""
+    WITH latest_invocation AS (
+        SELECT invocation_id, created_at
+        FROM {ELEMENTARY_SCHEMA}.dbt_invocations
+        ORDER BY created_at DESC
+        LIMIT 1
+    ),
+    model_issues AS (
+        SELECT
+            r.name as object_name,
+            'Model' as issue_type,
+            r.status as current_status,
+            1 as issue_count,
+            i.created_at as event_at,
+            r.message as summary
+        FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
+        JOIN latest_invocation i ON r.invocation_id = i.invocation_id
+        WHERE r.resource_type = 'model'
+          AND r.status IN ('fail', 'error')
+    ),
+    test_issues AS (
+        SELECT
+            COALESCE(r.table_name, COALESCE(t.short_name, r.test_name)) as object_name,
+            'Test' as issue_type,
+            CASE WHEN r.status = 'warn' THEN 'warn' ELSE 'fail' END as current_status,
+            COUNT(*) as issue_count,
+            i.created_at as event_at,
+            ANY_VALUE(COALESCE(t.short_name, r.test_name)) as summary
+        FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
+        JOIN latest_invocation i ON r.invocation_id = i.invocation_id
+        LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
+        WHERE r.status IN ('fail', 'error', 'warn')
+        GROUP BY 1, 2, 3, 5
+    )
+    SELECT *
+    FROM (
+        SELECT * FROM model_issues
+        UNION ALL
+        SELECT * FROM test_issues
+    )
+    ORDER BY
+        CASE current_status WHEN 'fail' THEN 0 WHEN 'error' THEN 0 WHEN 'warn' THEN 1 ELSE 2 END,
+        issue_type,
+        object_name
+    """
+    return run_query(query)

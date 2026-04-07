@@ -1,5 +1,6 @@
 """Alerts page - Current and historical test and model failures."""
 
+import pandas as pd
 import streamlit as st
 from services.alerts_service import (
     get_current_test_failures,
@@ -8,7 +9,9 @@ from services.alerts_service import (
     get_historical_test_failures,
     get_historical_model_failures,
     get_historical_alert_counts,
+    get_project_test_status_history,
 )
+from components.charts import project_test_failures_chart
 
 
 def _truncate(text: str, max_len: int = 50) -> str:
@@ -16,6 +19,97 @@ def _truncate(text: str, max_len: int = 50) -> str:
     if not text:
         return ""
     return text[:max_len] + "..." if len(text) > max_len else text
+
+
+def _calculate_test_resolution_metrics(history_df: pd.DataFrame):
+    """Build daily trend and fail-to-pass episode metrics from test history."""
+    if history_df.empty:
+        empty_daily = pd.DataFrame(columns=["DATE", "FAILED_TEST_RUNS", "DISTINCT_TESTS_FAILING", "RESOLVED_TESTS"])
+        empty_episodes = pd.DataFrame(columns=["TEST_UNIQUE_ID", "FAIL_STARTED_AT", "RESOLVED_AT", "RESOLUTION_HOURS", "FAILURE_RUNS"])
+        return empty_daily, empty_episodes
+
+    df = history_df.copy()
+    df["DETECTED_AT"] = pd.to_datetime(df["DETECTED_AT"])
+    df["DATE"] = df["DETECTED_AT"].dt.floor("D")
+    df["IS_FAIL"] = df["STATUS"].isin(["fail", "error"])
+    df["IS_PASS"] = df["STATUS"] == "pass"
+
+    failed_runs = (
+        df[df["IS_FAIL"]]
+        .groupby("DATE")
+        .size()
+        .rename("FAILED_TEST_RUNS")
+    )
+    distinct_failing = (
+        df[df["IS_FAIL"]]
+        .groupby("DATE")["TEST_UNIQUE_ID"]
+        .nunique()
+        .rename("DISTINCT_TESTS_FAILING")
+    )
+
+    episodes = []
+    for test_unique_id, group in df.sort_values("DETECTED_AT").groupby("TEST_UNIQUE_ID"):
+        active_failure = None
+        failure_runs = 0
+
+        for row in group.itertuples():
+            status = str(row.STATUS).lower()
+            if status in ("fail", "error"):
+                if active_failure is None:
+                    active_failure = row.DETECTED_AT
+                    failure_runs = 1
+                else:
+                    failure_runs += 1
+            elif status == "pass" and active_failure is not None:
+                resolution_hours = (row.DETECTED_AT - active_failure).total_seconds() / 3600
+                episodes.append(
+                    {
+                        "TEST_UNIQUE_ID": test_unique_id,
+                        "FAIL_STARTED_AT": active_failure,
+                        "RESOLVED_AT": row.DETECTED_AT,
+                        "RESOLUTION_HOURS": resolution_hours,
+                        "FAILURE_RUNS": failure_runs,
+                    }
+                )
+                active_failure = None
+                failure_runs = 0
+
+    episodes_df = pd.DataFrame(episodes)
+
+    if episodes_df.empty:
+        resolved_daily = pd.Series(dtype="int64", name="RESOLVED_TESTS")
+    else:
+        resolved_daily = (
+            episodes_df.assign(DATE=episodes_df["RESOLVED_AT"].dt.floor("D"))
+            .groupby("DATE")
+            .size()
+            .rename("RESOLVED_TESTS")
+        )
+
+    all_dates = pd.date_range(df["DATE"].min(), df["DATE"].max(), freq="D")
+    daily_df = (
+        pd.DataFrame({"DATE": all_dates})
+        .merge(failed_runs.reset_index(), on="DATE", how="left")
+        .merge(distinct_failing.reset_index(), on="DATE", how="left")
+        .merge(resolved_daily.reset_index(), on="DATE", how="left")
+        .fillna(0)
+    )
+
+    for col in ["FAILED_TEST_RUNS", "DISTINCT_TESTS_FAILING", "RESOLVED_TESTS"]:
+        daily_df[col] = daily_df[col].astype(int)
+
+    return daily_df, episodes_df
+
+
+def _format_resolution_duration(hours: float) -> str:
+    """Format hours as compact duration."""
+    if hours is None or pd.isna(hours):
+        return "N/A"
+    if hours < 1:
+        return f"{hours * 60:.0f}m"
+    if hours < 24:
+        return f"{hours:.1f}h"
+    return f"{hours / 24:.1f}d"
 
 
 def render(search_filter: str = ""):
@@ -92,6 +186,9 @@ def _render_historical_alerts(search_filter: str):
     failed_tests = int(row["FAILED_TESTS"] or 0)
     failed_models = int(row["FAILED_MODELS"] or 0)
 
+    test_history_df = get_project_test_status_history(days)
+    trend_df, episodes_df = _calculate_test_resolution_metrics(test_history_df)
+
     if failed_tests == 0 and failed_models == 0:
         st.success("No failures in this time period")
         return
@@ -102,6 +199,29 @@ def _render_historical_alerts(search_filter: str):
         st.metric("Test Failures", failed_tests)
     with metric_cols[1]:
         st.metric("Model Failures", failed_models)
+
+    if not test_history_df.empty:
+        latest_status_df = (
+            test_history_df.sort_values("DETECTED_AT")
+            .groupby("TEST_UNIQUE_ID")
+            .tail(1)
+        )
+        open_failures = int(latest_status_df["STATUS"].isin(["fail", "error"]).sum())
+        median_resolution = episodes_df["RESOLUTION_HOURS"].median() if not episodes_df.empty else None
+        p75_resolution = episodes_df["RESOLUTION_HOURS"].quantile(0.75) if not episodes_df.empty else None
+
+        st.divider()
+        trend_cols = st.columns(3)
+        with trend_cols[0]:
+            st.metric("Open Test Failures", open_failures)
+        with trend_cols[1]:
+            st.metric("Median Resolution", _format_resolution_duration(median_resolution))
+        with trend_cols[2]:
+            st.metric("P75 Resolution", _format_resolution_duration(p75_resolution))
+
+        st.subheader("Project Test Failure Trend")
+        st.caption("Daily failed test runs, distinct failing tests, and fail-to-pass resolutions.")
+        st.altair_chart(project_test_failures_chart(trend_df), use_container_width=True)
 
     st.divider()
 

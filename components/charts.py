@@ -168,3 +168,98 @@ def top_models_bar_chart(df: pd.DataFrame, height: int = 400) -> alt.Chart:
         .properties(height=height)
     )
     return chart
+
+
+def project_test_failures_chart(df: pd.DataFrame, height: int = 280) -> alt.Chart:
+    """Layered trend chart for project-level test failures and resolutions."""
+    if df.empty:
+        return alt.Chart().mark_text().encode(text=alt.value("No data"))
+
+    melted = df.melt(
+        id_vars=["DATE"],
+        value_vars=["FAILED_TEST_RUNS", "DISTINCT_TESTS_FAILING", "RESOLVED_TESTS"],
+        var_name="METRIC",
+        value_name="VALUE",
+    )
+
+    color_scale = alt.Scale(
+        domain=["FAILED_TEST_RUNS", "DISTINCT_TESTS_FAILING", "RESOLVED_TESTS"],
+        range=["#dc3545", "#f59e0b", "#28a745"],
+    )
+
+    label_map = {
+        "FAILED_TEST_RUNS": "Failed test runs",
+        "DISTINCT_TESTS_FAILING": "Distinct tests failing",
+        "RESOLVED_TESTS": "Resolved tests",
+    }
+    melted["METRIC_LABEL"] = melted["METRIC"].map(label_map)
+
+    chart = (
+        alt.Chart(melted)
+        .mark_line(point=True, strokeWidth=2.5)
+        .encode(
+            x=alt.X("DATE:T", title="Date"),
+            y=alt.Y("VALUE:Q", title="Count"),
+            color=alt.Color("METRIC_LABEL:N", scale=color_scale, title=None),
+            tooltip=[
+                alt.Tooltip("DATE:T", title="Date"),
+                alt.Tooltip("METRIC_LABEL:N", title="Metric"),
+                alt.Tooltip("VALUE:Q", title="Count"),
+            ],
+        )
+        .properties(height=height)
+    )
+    return chart
+
+
+def test_status_history_chart(df: pd.DataFrame, height: int = 140) -> alt.Chart:
+    """Timeline of test run statuses over time."""
+    if df.empty:
+        return alt.Chart().mark_text().encode(text=alt.value("No data"))
+
+    status_order = ["pass", "warn", "fail", "error"]
+    color_scale = alt.Scale(
+        domain=status_order,
+        range=["#28a745", "#ffc107", "#dc3545", "#dc3545"],
+    )
+
+    chart = (
+        alt.Chart(df)
+        .mark_circle(size=90)
+        .encode(
+            x=alt.X("DETECTED_AT:T", title="Run time"),
+            y=alt.Y("STATUS:N", title="Status", sort=status_order),
+            color=alt.Color("STATUS:N", scale=color_scale, legend=None),
+            tooltip=[
+                alt.Tooltip("DETECTED_AT:T", title="Detected"),
+                alt.Tooltip("STATUS:N", title="Status"),
+                alt.Tooltip("TEST_RESULTS_DESCRIPTION:N", title="Details"),
+            ],
+        )
+        .properties(height=height)
+    )
+    return chart
+
+
+def resolution_duration_chart(df: pd.DataFrame, height: int = 220) -> alt.Chart:
+    """Bar chart for fail-to-pass resolution durations."""
+    if df.empty:
+        return alt.Chart().mark_text().encode(text=alt.value("No resolved failures yet"))
+
+    chart = (
+        alt.Chart(df)
+        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .encode(
+            x=alt.X("FAIL_STARTED_AT:T", title="Failure started"),
+            y=alt.Y("RESOLUTION_HOURS:Q", title="Resolution time (hours)"),
+            color=alt.value("#dc3545"),
+            tooltip=[
+                alt.Tooltip("FAIL_STARTED_AT:T", title="Failed at"),
+                alt.Tooltip("RESOLVED_AT:T", title="Resolved at"),
+                alt.Tooltip("RESOLUTION_HOURS:Q", title="Hours", format=".2f"),
+                alt.Tooltip("FAILURE_RUNS:Q", title="Failing runs"),
+            ],
+        )
+        .properties(height=height)
+    )
+    return chart
