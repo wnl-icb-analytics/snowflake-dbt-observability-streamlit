@@ -276,10 +276,13 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         SELECT
             r.table_name as object_name,
             'Test Area' as issue_type,
-            CONCAT(
-                COALESCE(r.table_name, ''),
-                '||',
-                COALESCE(COALESCE(t.short_name, r.test_name), '')
+            COALESCE(
+                REGEXP_REPLACE(r.test_unique_id, '^test\\.[^.]+\\.', ''),
+                CONCAT(
+                    COALESCE(r.table_name, ''),
+                    '||',
+                    COALESCE(COALESCE(t.short_name, r.test_name), '')
+                )
             ) as logical_test_key,
             r.test_unique_id,
             r.status,
