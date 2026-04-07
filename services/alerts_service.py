@@ -210,7 +210,7 @@ def get_project_test_status_history(days: int = DEFAULT_LOOKBACK_DAYS):
 def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
     """Get combined current model and test issues for homepage summary."""
     query = f"""
-    WITH model_base AS (
+    WITH model_all AS (
         SELECT
             r.name as object_name,
             'Model' as issue_type,
@@ -219,20 +219,32 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
             r.message
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
         WHERE r.resource_type = 'model'
-        AND r.generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    ),
+    model_window AS (
+        SELECT *
+        FROM model_all
+        WHERE event_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    ),
+    model_window_agg AS (
+        SELECT
+            object_name,
+            COUNT_IF(status IN ('fail', 'error')) as failure_count,
+            COUNT(*) as total_runs
+        FROM model_window
+        GROUP BY object_name
     ),
     model_latest AS (
         SELECT
             object_name,
             status as current_status
-        FROM model_base
+        FROM model_all
         QUALIFY ROW_NUMBER() OVER (PARTITION BY object_name ORDER BY event_at DESC) = 1
     ),
     model_last_success AS (
         SELECT
             object_name,
             MAX(event_at) as last_success_at
-        FROM model_base
+        FROM model_all
         WHERE status = 'success'
         GROUP BY object_name
     ),
@@ -240,8 +252,8 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         SELECT
             b.object_name,
             b.issue_type,
-            COUNT_IF(b.status IN ('fail', 'error')) as failure_count,
-            COUNT(*) as total_runs,
+            COALESCE(w.failure_count, 0) as failure_count,
+            COALESCE(w.total_runs, 0) as total_runs,
             MIN(
                 CASE
                     WHEN b.status IN ('fail', 'error')
@@ -257,22 +269,23 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
                     THEN b.event_at
                 END
             ) as latest_failure_at
-        FROM model_base b
+        FROM model_all b
         LEFT JOIN model_last_success s ON b.object_name = s.object_name
-        GROUP BY b.object_name, b.issue_type
+        LEFT JOIN model_window_agg w ON b.object_name = w.object_name
+        GROUP BY b.object_name, b.issue_type, w.failure_count, w.total_runs
     ),
     model_failure_message AS (
         SELECT
             b.object_name,
             b.message as sample_message
-        FROM model_base b
+        FROM model_all b
         JOIN model_agg a
           ON b.object_name = a.object_name
          AND b.event_at = a.latest_failure_at
         WHERE b.status IN ('fail', 'error')
         QUALIFY ROW_NUMBER() OVER (PARTITION BY b.object_name ORDER BY b.event_at DESC) = 1
     ),
-    test_base AS (
+    test_all AS (
         SELECT
             r.table_name as object_name,
             'Test Area' as issue_type,
@@ -290,15 +303,27 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
             COALESCE(t.short_name, r.test_name) as test_name
         FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
         LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
-        WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-        AND r.table_name IS NOT NULL
+        WHERE r.table_name IS NOT NULL
+    ),
+    test_window AS (
+        SELECT *
+        FROM test_all
+        WHERE event_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    ),
+    test_window_agg AS (
+        SELECT
+            logical_test_key,
+            COUNT_IF(status IN ('fail', 'error')) as failure_count,
+            COUNT(*) as total_runs
+        FROM test_window
+        GROUP BY logical_test_key
     ),
     test_latest AS (
         SELECT
             object_name,
             logical_test_key,
             status as current_status
-        FROM test_base
+        FROM test_all
         QUALIFY ROW_NUMBER() OVER (PARTITION BY logical_test_key ORDER BY event_at DESC) = 1
     ),
     test_last_pass AS (
@@ -306,7 +331,7 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
             object_name,
             logical_test_key,
             MAX(event_at) as last_pass_at
-        FROM test_base
+        FROM test_all
         WHERE status = 'pass'
         GROUP BY object_name, logical_test_key
     ),
@@ -316,8 +341,8 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
             b.issue_type,
             b.logical_test_key,
             ANY_VALUE(b.test_name) as test_name,
-            COUNT_IF(b.status IN ('fail', 'error')) as failure_count,
-            COUNT(*) as total_runs,
+            COALESCE(w.failure_count, 0) as failure_count,
+            COALESCE(w.total_runs, 0) as total_runs,
             MIN(
                 CASE
                     WHEN b.status <> 'pass'
@@ -326,11 +351,13 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
                 END
             ) as first_issue_at,
             MAX(CASE WHEN b.status IN ('fail', 'error') THEN b.event_at END) as last_issue_at
-        FROM test_base b
+        FROM test_all b
         LEFT JOIN test_last_pass p
             ON b.object_name = p.object_name
            AND b.logical_test_key = p.logical_test_key
-        GROUP BY b.object_name, b.issue_type, b.logical_test_key
+        LEFT JOIN test_window_agg w
+            ON b.logical_test_key = w.logical_test_key
+        GROUP BY b.object_name, b.issue_type, b.logical_test_key, w.failure_count, w.total_runs
     ),
     test_filtered AS (
         SELECT

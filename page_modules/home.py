@@ -128,7 +128,7 @@ def _render_current_issues(days: int):
     display_df = issues_df.copy()
     display_df["STATUS_LABEL"] = display_df["CURRENT_STATUS"].map(_format_issue_status)
     display_df["SUMMARY"] = display_df.apply(_summarize_issue, axis=1)
-    display_df["FIRST_SEEN"] = display_df["FIRST_ISSUE_AT"].map(_format_timestamp)
+    display_df["FIRST_SEEN"] = display_df["FIRST_ISSUE_AT"].map(_format_relative_time)
     display_df["LAST_SEEN"] = display_df["LAST_ISSUE_AT"].map(_format_timestamp)
 
     display_df = display_df.rename(
