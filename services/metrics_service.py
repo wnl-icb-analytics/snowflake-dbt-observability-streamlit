@@ -239,7 +239,7 @@ def get_project_totals():
     query = f"""
     SELECT
         (SELECT COUNT(*) FROM {ELEMENTARY_SCHEMA}.dbt_models) as total_models,
-        (SELECT COUNT(DISTINCT test_unique_id) FROM {ELEMENTARY_SCHEMA}.elementary_test_results) as total_tests
+        (SELECT COUNT(*) FROM {ELEMENTARY_SCHEMA}.dbt_tests) as total_tests
     """
     return run_query(query)
 

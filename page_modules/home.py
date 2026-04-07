@@ -144,7 +144,7 @@ def _render_current_issues(days: int):
     )
 
     st.dataframe(
-        display_df[["Object", "Type", "Status", f"Failures ({days}d)", "First Seen", "Last Seen", "Summary"]],
+        display_df[["Object", "Type", "Status", f"Failures ({days}d)", "Streak Started", "Last Seen", "Summary"]],
         use_container_width=True,
         hide_index=True,
     )
