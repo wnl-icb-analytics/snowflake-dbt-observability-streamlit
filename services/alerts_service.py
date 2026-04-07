@@ -250,10 +250,27 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
                 END
             ) as first_issue_at,
             MAX(CASE WHEN b.status IN ('fail', 'error') THEN b.event_at END) as last_issue_at,
-            ANY_VALUE(b.message) as sample_message
+            MAX(
+                CASE
+                    WHEN b.status IN ('fail', 'error')
+                     AND b.event_at > COALESCE(s.last_success_at, TO_TIMESTAMP('1970-01-01'))
+                    THEN b.event_at
+                END
+            ) as latest_failure_at
         FROM model_base b
         LEFT JOIN model_last_success s ON b.object_name = s.object_name
         GROUP BY b.object_name, b.issue_type
+    ),
+    model_failure_message AS (
+        SELECT
+            b.object_name,
+            b.message as sample_message
+        FROM model_base b
+        JOIN model_agg a
+          ON b.object_name = a.object_name
+         AND b.event_at = a.latest_failure_at
+        WHERE b.status IN ('fail', 'error')
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY b.object_name ORDER BY b.event_at DESC) = 1
     ),
     test_base AS (
         SELECT
@@ -353,9 +370,10 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         NULL as affected_checks,
         a.first_issue_at,
         a.last_issue_at,
-        a.sample_message
+        m.sample_message
     FROM model_agg a
     JOIN model_latest l USING (object_name)
+    LEFT JOIN model_failure_message m USING (object_name)
     WHERE l.current_status IN ('fail', 'error')
       AND a.failure_count > 0
 
