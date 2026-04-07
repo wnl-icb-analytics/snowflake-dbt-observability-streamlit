@@ -149,14 +149,14 @@ def _render_current_issues(days: int):
 
 
 def _render_latest_run_issues():
-    """Render issues from the most recent invocation."""
+    """Render issues from the most recent build invocation."""
     latest_df = get_latest_run_issues()
 
-    st.subheader("Latest Run Issues")
-    st.caption("Failures and warnings from the most recent dbt invocation only.")
+    st.subheader("Latest Build Issues")
+    st.caption("Failures and warnings from the most recent dbt build invocation.")
 
     if latest_df.empty:
-        st.success("Latest run completed without failures or warnings")
+        st.success("Latest build completed without failures or warnings")
         return
 
     display_df = latest_df.copy()

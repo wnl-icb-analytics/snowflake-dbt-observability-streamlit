@@ -343,11 +343,12 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
 
 
 def get_latest_run_issues():
-    """Get model/test issues from the most recent invocation only."""
+    """Get model/test issues from the most recent build invocation only."""
     query = f"""
     WITH latest_invocation AS (
-        SELECT invocation_id, created_at
+        SELECT invocation_id, created_at, command
         FROM {ELEMENTARY_SCHEMA}.dbt_invocations
+        WHERE LOWER(command) LIKE '%build%'
         ORDER BY created_at DESC
         LIMIT 1
     ),
