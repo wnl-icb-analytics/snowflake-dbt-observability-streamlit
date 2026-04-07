@@ -259,6 +259,11 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         SELECT
             r.table_name as object_name,
             'Test Area' as issue_type,
+            CONCAT(
+                COALESCE(r.table_name, ''),
+                '||',
+                COALESCE(COALESCE(t.short_name, r.test_name), '')
+            ) as logical_test_key,
             r.test_unique_id,
             r.status,
             r.detected_at as event_at,
@@ -271,25 +276,25 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
     test_latest AS (
         SELECT
             object_name,
-            test_unique_id,
+            logical_test_key,
             status as current_status
         FROM test_base
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY test_unique_id ORDER BY event_at DESC) = 1
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY logical_test_key ORDER BY event_at DESC) = 1
     ),
     test_last_pass AS (
         SELECT
             object_name,
-            test_unique_id,
+            logical_test_key,
             MAX(event_at) as last_pass_at
         FROM test_base
         WHERE status = 'pass'
-        GROUP BY object_name, test_unique_id
+        GROUP BY object_name, logical_test_key
     ),
     test_agg_per_check AS (
         SELECT
             b.object_name,
             b.issue_type,
-            b.test_unique_id,
+            b.logical_test_key,
             ANY_VALUE(b.test_name) as test_name,
             COUNT_IF(b.status IN ('fail', 'error')) as failure_count,
             COUNT(*) as total_runs,
@@ -304,14 +309,14 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         FROM test_base b
         LEFT JOIN test_last_pass p
             ON b.object_name = p.object_name
-           AND b.test_unique_id = p.test_unique_id
-        GROUP BY b.object_name, b.issue_type, b.test_unique_id
+           AND b.logical_test_key = p.logical_test_key
+        GROUP BY b.object_name, b.issue_type, b.logical_test_key
     ),
     test_filtered AS (
         SELECT
             a.object_name,
             a.issue_type,
-            a.test_unique_id,
+            a.logical_test_key,
             a.test_name,
             a.failure_count,
             a.total_runs,
@@ -321,7 +326,7 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         FROM test_agg_per_check a
         JOIN test_latest l
             ON a.object_name = l.object_name
-           AND a.test_unique_id = l.test_unique_id
+           AND a.logical_test_key = l.logical_test_key
         WHERE a.failure_count > 0
           AND l.current_status <> 'pass'
           AND NOT (a.failure_count = 1 AND l.current_status = 'pass')
