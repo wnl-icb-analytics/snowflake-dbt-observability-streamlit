@@ -21,13 +21,20 @@ def get_dashboard_kpis(days: int = DEFAULT_LOOKBACK_DAYS):
         FROM model_all
         WHERE generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
     ),
+    -- Only consider models still defined in the project (refreshed from
+    -- the latest manifest by Elementary). Deleted models drop off.
+    current_models AS (
+        SELECT DISTINCT name
+        FROM {ELEMENTARY_SCHEMA}.dbt_models
+    ),
     model_latest AS (
         SELECT
-            name,
-            status,
-            execution_time,
-            ROW_NUMBER() OVER (PARTITION BY name ORDER BY generated_at DESC) as rn
-        FROM model_all
+            ma.name,
+            ma.status,
+            ma.execution_time,
+            ROW_NUMBER() OVER (PARTITION BY ma.name ORDER BY ma.generated_at DESC) as rn
+        FROM model_all ma
+        JOIN current_models cm USING (name)
     ),
     model_last_success AS (
         SELECT
@@ -61,6 +68,7 @@ def get_dashboard_kpis(days: int = DEFAULT_LOOKBACK_DAYS):
     test_all AS (
         SELECT
             r.table_name,
+            r.test_unique_id,
             COALESCE(
                 REGEXP_REPLACE(r.test_unique_id, '^test\\.[^.]+\\.', ''),
                 CONCAT(COALESCE(r.table_name, ''), '||', COALESCE(COALESCE(t.short_name, r.test_name), ''))
@@ -76,13 +84,25 @@ def get_dashboard_kpis(days: int = DEFAULT_LOOKBACK_DAYS):
         FROM test_all
         WHERE detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
     ),
+    -- Only consider tests still defined in the project. A logical_test_key
+    -- survives if at least one of its underlying test_unique_ids is still
+    -- in dbt_tests (handles namespace renames across versions).
+    current_tests AS (
+        SELECT DISTINCT unique_id as test_unique_id
+        FROM {ELEMENTARY_SCHEMA}.dbt_tests
+    ),
+    test_all_current AS (
+        SELECT ta.*
+        FROM test_all ta
+        JOIN current_tests ct USING (test_unique_id)
+    ),
     test_latest AS (
         SELECT
             table_name,
             logical_test_key,
             status,
             ROW_NUMBER() OVER (PARTITION BY logical_test_key ORDER BY detected_at DESC) as rn
-        FROM test_all
+        FROM test_all_current
     ),
     test_last_pass AS (
         SELECT
@@ -110,7 +130,7 @@ def get_dashboard_kpis(days: int = DEFAULT_LOOKBACK_DAYS):
             JOIN test_latest l ON w.logical_test_key = l.logical_test_key AND l.rn = 1
             LEFT JOIN test_last_pass p ON w.logical_test_key = p.logical_test_key
             WHERE w.failure_count > 0
-              AND l.status <> 'pass'
+              AND l.status IN ('fail', 'error')
         )
     ),
     last_run AS (
