@@ -265,55 +265,53 @@ def render(search_filter: str = ""):
 
     st.subheader("Recent Runs")
     runs = get_recent_runs(limit=8)
-    col_runs, _ = st.columns([1, 1])
-    with col_runs:
-        if runs.empty:
-            st.info("No recent runs")
-        else:
-            for _, r_row in runs.iterrows():
-                invocation_id = r_row["INVOCATION_ID"]
-                with st.container(border=True):
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.markdown(f"**{_format_timestamp(r_row['CREATED_AT'])}**")
-                        cmd = r_row["COMMAND"] or "dbt"
-                        target = r_row["TARGET_NAME"] or ""
-                        warehouse = r_row.get("WAREHOUSE") or ""
-                        selected = r_row.get("SELECTED") or ""
-                        models_run = int(r_row.get("MODELS_RUN") or 0)
-                        success = int(r_row.get("SUCCESS_COUNT") or 0)
-                        fail = int(r_row.get("FAIL_COUNT") or 0)
-                        duration = r_row.get("DURATION_SECONDS") or 0
-                        tests_run = int(r_row.get("TESTS_RUN") or 0)
-                        tests_passed = int(r_row.get("TESTS_PASSED") or 0)
-                        tests_failed = int(r_row.get("TESTS_FAILED") or 0)
-                        tests_warned = int(r_row.get("TESTS_WARNED") or 0)
+    if runs.empty:
+        st.info("No recent runs")
+    else:
+        for _, r_row in runs.iterrows():
+            invocation_id = r_row["INVOCATION_ID"]
+            with st.container(border=True):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.markdown(f"**{_format_timestamp(r_row['CREATED_AT'])}**")
+                    cmd = r_row["COMMAND"] or "dbt"
+                    target = r_row["TARGET_NAME"] or ""
+                    warehouse = r_row.get("WAREHOUSE") or ""
+                    selected = r_row.get("SELECTED") or ""
+                    models_run = int(r_row.get("MODELS_RUN") or 0)
+                    success = int(r_row.get("SUCCESS_COUNT") or 0)
+                    fail = int(r_row.get("FAIL_COUNT") or 0)
+                    duration = r_row.get("DURATION_SECONDS") or 0
+                    tests_run = int(r_row.get("TESTS_RUN") or 0)
+                    tests_passed = int(r_row.get("TESTS_PASSED") or 0)
+                    tests_failed = int(r_row.get("TESTS_FAILED") or 0)
+                    tests_warned = int(r_row.get("TESTS_WARNED") or 0)
 
-                        info_parts = [cmd, target]
-                        if warehouse:
-                            info_parts.append(warehouse)
-                        st.caption(" | ".join(p for p in info_parts if p))
+                    info_parts = [cmd, target]
+                    if warehouse:
+                        info_parts.append(warehouse)
+                    st.caption(" | ".join(p for p in info_parts if p))
 
-                        if selected:
-                            st.caption(_truncate(selected, 50))
+                    if selected:
+                        st.caption(_truncate(selected, 50))
 
-                        # Model stats
-                        if models_run > 0:
-                            time_str = _format_duration(duration)
-                            if fail > 0:
-                                st.caption(f"Models: 🟢 {success} 🔴 {fail} | {time_str}")
-                            else:
-                                st.caption(f"Models: 🟢 {success} | {time_str}")
+                    # Model stats
+                    if models_run > 0:
+                        time_str = _format_duration(duration)
+                        if fail > 0:
+                            st.caption(f"Models: 🟢 {success} 🔴 {fail} | {time_str}")
+                        else:
+                            st.caption(f"Models: 🟢 {success} | {time_str}")
 
-                        # Test stats
-                        if tests_run > 0:
-                            test_parts = [f"Tests: 🟢 {tests_passed}"]
-                            if tests_failed > 0:
-                                test_parts.append(f"🔴 {tests_failed}")
-                            if tests_warned > 0:
-                                test_parts.append(f"🟡 {tests_warned}")
-                            st.caption(" ".join(test_parts))
-                    with col2:
-                        if st.button("View", key=f"home_run_{invocation_id}"):
-                            st.session_state["selected_invocation"] = invocation_id
-                            st.rerun()
+                    # Test stats
+                    if tests_run > 0:
+                        test_parts = [f"Tests: 🟢 {tests_passed}"]
+                        if tests_failed > 0:
+                            test_parts.append(f"🔴 {tests_failed}")
+                        if tests_warned > 0:
+                            test_parts.append(f"🟡 {tests_warned}")
+                        st.caption(" ".join(test_parts))
+                with col2:
+                    if st.button("View", key=f"home_run_{invocation_id}"):
+                        st.session_state["selected_invocation"] = invocation_id
+                        st.rerun()
