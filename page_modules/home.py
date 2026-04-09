@@ -3,7 +3,7 @@
 import os
 import pandas as pd
 import streamlit as st
-from services.metrics_service import get_dashboard_kpis, get_recent_runs, get_top_failures, get_project_totals, get_total_execution_time
+from services.metrics_service import get_dashboard_kpis, get_recent_runs, get_project_totals, get_total_execution_time
 from services.alerts_service import get_current_issue_summary, get_latest_run_issues
 
 DBT_LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "dbt-logo.svg")
@@ -263,52 +263,10 @@ def render(search_filter: str = ""):
 
     st.divider()
 
-    # Two column layout: Needs Attention + Recent Runs
-    col_failures, col_runs = st.columns(2)
-
-    with col_failures:
-        st.subheader("Needs Attention")
-        # Get all current failures (no limit)
-        failures = get_top_failures(limit=100, days=time_range)
-        if failures.empty:
-            st.info("No current failures")
-        else:
-            # Show count from KPIs for consistency with banner/alerts
-            st.caption(f"{total_failures} active failures")
-            for _, f_row in failures.iterrows():
-                icon = ":test_tube:" if f_row["TYPE"] == "test" else ":package:"
-                unique_id = f_row["UNIQUE_ID"]
-                model_path = f_row.get("MODEL_PATH") or ""
-
-                with st.container(border=True):
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        if f_row["TYPE"] == "test":
-                            model_name = f_row.get("MODEL_NAME") or "unknown"
-                            test_name = _truncate(f_row["NAME"])
-                            st.markdown(f"{icon} **{model_name}**")
-                            st.caption(f"{test_name}")
-                        else:
-                            name = _truncate(f_row["NAME"])
-                            st.markdown(f"{icon} **{name}**")
-                        if model_path:
-                            st.caption(_truncate(model_path, 50))
-                        st.caption(_format_timestamp(f_row['FAILED_AT']))
-                    with col2:
-                        if f_row["TYPE"] == "test":
-                            if st.button("View", key=f"home_test_{unique_id}"):
-                                st.session_state["selected_test"] = unique_id
-                                st.session_state["selected_model"] = None
-                                st.rerun()
-                        else:
-                            if st.button("View", key=f"home_model_{unique_id}"):
-                                st.session_state["selected_model"] = unique_id
-                                st.session_state["selected_test"] = None
-                                st.rerun()
-
+    st.subheader("Recent Runs")
+    runs = get_recent_runs(limit=8)
+    col_runs, _ = st.columns([1, 1])
     with col_runs:
-        st.subheader("Recent Runs")
-        runs = get_recent_runs(limit=8)
         if runs.empty:
             st.info("No recent runs")
         else:
