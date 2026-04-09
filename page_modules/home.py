@@ -3,7 +3,7 @@
 import os
 import pandas as pd
 import streamlit as st
-from services.metrics_service import get_dashboard_kpis, get_recent_runs, get_top_failures, get_project_totals, get_total_execution_time
+from services.metrics_service import get_dashboard_kpis, get_recent_runs, get_project_totals, get_total_execution_time
 from services.alerts_service import get_current_issue_summary, get_latest_run_issues
 
 DBT_LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "dbt-logo.svg")
@@ -263,99 +263,55 @@ def render(search_filter: str = ""):
 
     st.divider()
 
-    # Two column layout: Needs Attention + Recent Runs
-    col_failures, col_runs = st.columns(2)
+    st.subheader("Recent Runs")
+    runs = get_recent_runs(limit=8)
+    if runs.empty:
+        st.info("No recent runs")
+    else:
+        for _, r_row in runs.iterrows():
+            invocation_id = r_row["INVOCATION_ID"]
+            with st.container(border=True):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.markdown(f"**{_format_timestamp(r_row['CREATED_AT'])}**")
+                    cmd = r_row["COMMAND"] or "dbt"
+                    target = r_row["TARGET_NAME"] or ""
+                    warehouse = r_row.get("WAREHOUSE") or ""
+                    selected = r_row.get("SELECTED") or ""
+                    models_run = int(r_row.get("MODELS_RUN") or 0)
+                    success = int(r_row.get("SUCCESS_COUNT") or 0)
+                    fail = int(r_row.get("FAIL_COUNT") or 0)
+                    duration = r_row.get("DURATION_SECONDS") or 0
+                    tests_run = int(r_row.get("TESTS_RUN") or 0)
+                    tests_passed = int(r_row.get("TESTS_PASSED") or 0)
+                    tests_failed = int(r_row.get("TESTS_FAILED") or 0)
+                    tests_warned = int(r_row.get("TESTS_WARNED") or 0)
 
-    with col_failures:
-        st.subheader("Needs Attention")
-        # Get all current failures (no limit)
-        failures = get_top_failures(limit=100, days=time_range)
-        if failures.empty:
-            st.info("No current failures")
-        else:
-            # Show count from KPIs for consistency with banner/alerts
-            st.caption(f"{total_failures} active failures")
-            for _, f_row in failures.iterrows():
-                icon = ":test_tube:" if f_row["TYPE"] == "test" else ":package:"
-                unique_id = f_row["UNIQUE_ID"]
-                model_path = f_row.get("MODEL_PATH") or ""
+                    info_parts = [cmd, target]
+                    if warehouse:
+                        info_parts.append(warehouse)
+                    st.caption(" | ".join(p for p in info_parts if p))
 
-                with st.container(border=True):
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        if f_row["TYPE"] == "test":
-                            model_name = f_row.get("MODEL_NAME") or "unknown"
-                            test_name = _truncate(f_row["NAME"])
-                            st.markdown(f"{icon} **{model_name}**")
-                            st.caption(f"{test_name}")
+                    if selected:
+                        st.caption(_truncate(selected, 50))
+
+                    # Model stats
+                    if models_run > 0:
+                        time_str = _format_duration(duration)
+                        if fail > 0:
+                            st.caption(f"Models: 🟢 {success} 🔴 {fail} | {time_str}")
                         else:
-                            name = _truncate(f_row["NAME"])
-                            st.markdown(f"{icon} **{name}**")
-                        if model_path:
-                            st.caption(_truncate(model_path, 50))
-                        st.caption(_format_timestamp(f_row['FAILED_AT']))
-                    with col2:
-                        if f_row["TYPE"] == "test":
-                            if st.button("View", key=f"home_test_{unique_id}"):
-                                st.session_state["selected_test"] = unique_id
-                                st.session_state["selected_model"] = None
-                                st.rerun()
-                        else:
-                            if st.button("View", key=f"home_model_{unique_id}"):
-                                st.session_state["selected_model"] = unique_id
-                                st.session_state["selected_test"] = None
-                                st.rerun()
+                            st.caption(f"Models: 🟢 {success} | {time_str}")
 
-    with col_runs:
-        st.subheader("Recent Runs")
-        runs = get_recent_runs(limit=8)
-        if runs.empty:
-            st.info("No recent runs")
-        else:
-            for _, r_row in runs.iterrows():
-                invocation_id = r_row["INVOCATION_ID"]
-                with st.container(border=True):
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.markdown(f"**{_format_timestamp(r_row['CREATED_AT'])}**")
-                        cmd = r_row["COMMAND"] or "dbt"
-                        target = r_row["TARGET_NAME"] or ""
-                        warehouse = r_row.get("WAREHOUSE") or ""
-                        selected = r_row.get("SELECTED") or ""
-                        models_run = int(r_row.get("MODELS_RUN") or 0)
-                        success = int(r_row.get("SUCCESS_COUNT") or 0)
-                        fail = int(r_row.get("FAIL_COUNT") or 0)
-                        duration = r_row.get("DURATION_SECONDS") or 0
-                        tests_run = int(r_row.get("TESTS_RUN") or 0)
-                        tests_passed = int(r_row.get("TESTS_PASSED") or 0)
-                        tests_failed = int(r_row.get("TESTS_FAILED") or 0)
-                        tests_warned = int(r_row.get("TESTS_WARNED") or 0)
-
-                        info_parts = [cmd, target]
-                        if warehouse:
-                            info_parts.append(warehouse)
-                        st.caption(" | ".join(p for p in info_parts if p))
-
-                        if selected:
-                            st.caption(_truncate(selected, 50))
-
-                        # Model stats
-                        if models_run > 0:
-                            time_str = _format_duration(duration)
-                            if fail > 0:
-                                st.caption(f"Models: 🟢 {success} 🔴 {fail} | {time_str}")
-                            else:
-                                st.caption(f"Models: 🟢 {success} | {time_str}")
-
-                        # Test stats
-                        if tests_run > 0:
-                            test_parts = [f"Tests: 🟢 {tests_passed}"]
-                            if tests_failed > 0:
-                                test_parts.append(f"🔴 {tests_failed}")
-                            if tests_warned > 0:
-                                test_parts.append(f"🟡 {tests_warned}")
-                            st.caption(" ".join(test_parts))
-                    with col2:
-                        if st.button("View", key=f"home_run_{invocation_id}"):
-                            st.session_state["selected_invocation"] = invocation_id
-                            st.rerun()
+                    # Test stats
+                    if tests_run > 0:
+                        test_parts = [f"Tests: 🟢 {tests_passed}"]
+                        if tests_failed > 0:
+                            test_parts.append(f"🔴 {tests_failed}")
+                        if tests_warned > 0:
+                            test_parts.append(f"🟡 {tests_warned}")
+                        st.caption(" ".join(test_parts))
+                with col2:
+                    if st.button("View", key=f"home_run_{invocation_id}"):
+                        st.session_state["selected_invocation"] = invocation_id
+                        st.rerun()

@@ -233,12 +233,20 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         FROM model_window
         GROUP BY object_name
     ),
+    -- Source of truth for currently-defined models (refreshed from manifest
+    -- on every dbt run). JOINing against this means deleted models drop off
+    -- the dashboard immediately, regardless of when their last failure was.
+    current_models AS (
+        SELECT DISTINCT name as object_name
+        FROM {ELEMENTARY_SCHEMA}.dbt_models
+    ),
     model_latest AS (
         SELECT
-            object_name,
-            status as current_status
-        FROM model_all
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY object_name ORDER BY event_at DESC) = 1
+            ma.object_name,
+            ma.status as current_status
+        FROM model_all ma
+        JOIN current_models cm USING (object_name)
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY ma.object_name ORDER BY ma.event_at DESC) = 1
     ),
     model_last_success AS (
         SELECT
@@ -318,13 +326,19 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         FROM test_window
         GROUP BY logical_test_key
     ),
+    -- Source of truth for currently-defined tests. Removed tests drop off.
+    current_tests AS (
+        SELECT DISTINCT unique_id as test_unique_id
+        FROM {ELEMENTARY_SCHEMA}.dbt_tests
+    ),
     test_latest AS (
         SELECT
-            object_name,
-            logical_test_key,
-            status as current_status
-        FROM test_all
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY logical_test_key ORDER BY event_at DESC) = 1
+            ta.object_name,
+            ta.logical_test_key,
+            ta.status as current_status
+        FROM test_all ta
+        JOIN current_tests ct USING (test_unique_id)
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY ta.logical_test_key ORDER BY ta.event_at DESC) = 1
     ),
     test_last_pass AS (
         SELECT
@@ -409,13 +423,13 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
 
     UNION ALL
 
+    -- Only surface test areas with at least one check currently failing.
+    -- Test areas downgraded to warn (or otherwise no longer erroring) drop off
+    -- instead of lingering with a 'skipped' status.
     SELECT
         object_name,
         issue_type,
-        CASE
-            WHEN currently_failing_checks > 0 THEN 'fail'
-            ELSE 'skipped'
-        END as current_status,
+        'fail' as current_status,
         failure_count,
         NULL as total_runs,
         affected_checks,
@@ -423,6 +437,7 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         last_issue_at,
         sample_message
     FROM test_agg
+    WHERE currently_failing_checks > 0
     ORDER BY failure_count DESC, last_issue_at DESC
     """
     return run_query(query)
