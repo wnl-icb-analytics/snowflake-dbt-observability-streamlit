@@ -2,6 +2,7 @@
 
 import os
 import re
+import json
 import pandas as pd
 import streamlit as st
 from services.metrics_service import get_dashboard_kpis, get_recent_runs, get_project_totals, get_total_execution_time
@@ -10,6 +11,7 @@ from services.alerts_service import (
     get_latest_run_issues,
     get_latest_build_summary,
     get_downstream_skips,
+    get_latest_build_test_results,
 )
 
 DBT_LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "dbt-logo.svg")
@@ -172,6 +174,85 @@ def _render_model_error_card(object_name, message, unique_id, meta_line, key_pre
             st.rerun()
 
 
+def _test_kind(test_name, namespace) -> str:
+    """Short label for the kind of test (accepted_values, not_null, ...)."""
+    name = (test_name or "").lower()
+    for kind in ("accepted_values", "not_null", "relationships", "accepted_range", "unique"):
+        if kind in name:
+            return kind
+    return test_name or namespace or "test"
+
+
+def _accepted_values(test_params):
+    """Pull the accepted `values` list out of a test_params JSON string, if any."""
+    if not test_params:
+        return None
+    try:
+        data = json.loads(test_params) if isinstance(test_params, str) else test_params
+    except (ValueError, TypeError):
+        return None
+    vals = data.get("values") if isinstance(data, dict) else None
+    if isinstance(vals, list) and vals:
+        return [str(v) for v in vals]
+    return None
+
+
+def _render_test_issue_card(row, key_prefix):
+    """Expandable card for one failing/warning test: what it checks, how many
+    rows failed, accepted values, sample rows/query, and a drill-in."""
+    status = (row.get("STATUS") or "").lower()
+    icon = "🟡" if status == "warn" else "🔴"
+    kind = _test_kind(row.get("TEST_NAME"), row.get("TEST_NAMESPACE"))
+    loc = ".".join(p for p in [row.get("TABLE_NAME") or "", row.get("COLUMN_NAME") or ""] if p)
+    title = f"{icon} {kind}" + (f" — {loc}" if loc else "")
+
+    with st.expander(title, expanded=False):
+        meta = " · ".join(p for p in [
+            _format_issue_status(row.get("STATUS")),
+            row.get("TEST_NAMESPACE") or "",
+            _format_timestamp(row.get("DETECTED_AT")),
+        ] if p)
+        st.caption(meta)
+
+        failures = row.get("FAILURES")
+        if failures is None or (isinstance(failures, float) and pd.isna(failures)):
+            failures = row.get("FAILED_ROW_COUNT")
+        if failures is not None and not (isinstance(failures, float) and pd.isna(failures)):
+            try:
+                st.markdown(f"**Failing rows:** {int(failures)}")
+            except (TypeError, ValueError):
+                pass
+
+        accepted = _accepted_values(row.get("TEST_PARAMS"))
+        if accepted:
+            st.markdown("**Accepted values:** " + ", ".join(f"`{v}`" for v in accepted))
+
+        desc = row.get("TEST_RESULTS_DESCRIPTION")
+        if desc and str(desc).strip().lower() not in ("", "warn", "fail", "error", "pass"):
+            (st.warning if status == "warn" else st.error)(str(desc))
+
+        result_rows = row.get("RESULT_ROWS")
+        if result_rows and str(result_rows).strip():
+            st.markdown("**Sample failing rows:**")
+            st.code(str(result_rows), language="json")
+
+        query = row.get("TEST_RESULTS_QUERY")
+        if query and str(query).strip():
+            st.markdown("**Query to inspect failing rows:**")
+            st.code(str(query), language="sql")
+
+        params = row.get("TEST_PARAMS")
+        if params and str(params).strip() and not accepted:
+            st.markdown("**Test parameters:**")
+            st.code(str(params), language="json")
+
+        tuid = row.get("TEST_UNIQUE_ID")
+        if tuid and pd.notna(tuid) and st.button("View test", key=f"{key_prefix}_{tuid}"):
+            st.session_state["selected_test"] = str(tuid)
+            st.session_state["selected_model"] = None
+            st.rerun()
+
+
 def _summarize_issue(row) -> str:
     """Build a short human-readable summary for the current issue table."""
     issue_type = row["ISSUE_TYPE"]
@@ -287,7 +368,6 @@ def _render_latest_run_issues():
         skips_map = {r["UNIQUE_ID"]: int(r["DOWNSTREAM_SKIPPED"]) for _, r in ds.iterrows()}
 
     model_df = latest_df[latest_df["ISSUE_TYPE"] == "Model"]
-    test_df = latest_df[latest_df["ISSUE_TYPE"] != "Model"]
 
     if not model_df.empty:
         st.markdown("**Model failures**")
@@ -304,29 +384,11 @@ def _render_latest_run_issues():
                 downstream_skipped=skips_map.get(uid),
             )
 
-    if not test_df.empty:
+    test_results = get_latest_build_test_results()
+    if not test_results.empty:
         st.markdown("**Test issues**")
-        display_df = test_df.copy()
-        display_df["STATUS_LABEL"] = display_df["CURRENT_STATUS"].map(_format_issue_status)
-        display_df["EVENT_AT"] = display_df["EVENT_AT"].map(_format_timestamp)
-        display_df["SUMMARY"] = display_df["SUMMARY"].fillna("").map(lambda x: _truncate(str(x).replace("\n", " "), 90))
-
-        display_df = display_df.rename(
-            columns={
-                "OBJECT_NAME": "Object",
-                "ISSUE_TYPE": "Type",
-                "STATUS_LABEL": "Status",
-                "ISSUE_COUNT": "Count",
-                "EVENT_AT": "Run Time",
-                "SUMMARY": "Summary",
-            }
-        )
-
-        st.dataframe(
-            display_df[["Object", "Type", "Status", "Count", "Run Time", "Summary"]],
-            use_container_width=True,
-            hide_index=True,
-        )
+        for _, row in test_results.iterrows():
+            _render_test_issue_card(row, key_prefix="latest_test")
 
 
 

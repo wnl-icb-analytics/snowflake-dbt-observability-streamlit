@@ -563,3 +563,41 @@ def get_downstream_skips(invocation_id: str):
     GROUP BY d.root
     """
     return run_query(query)
+
+
+def get_latest_build_test_results():
+    """Per-test failures/warnings from the most recent build, with the detail
+    needed to see what broke (accepted values, failing-row count, sample rows,
+    query)."""
+    query = f"""
+    WITH latest_invocation AS (
+        SELECT invocation_id, created_at
+        FROM {ELEMENTARY_SCHEMA}.dbt_invocations
+        WHERE LOWER(command) LIKE '%build%'
+        ORDER BY created_at DESC
+        LIMIT 1
+    )
+    SELECT
+        r.test_unique_id,
+        COALESCE(t.short_name, r.test_short_name, r.test_name) as test_name,
+        COALESCE(t.test_namespace, r.test_sub_type, r.test_type) as test_namespace,
+        r.table_name,
+        r.column_name,
+        r.status,
+        r.failures,
+        r.failed_row_count,
+        r.test_params,
+        r.result_rows,
+        r.test_results_description,
+        r.test_results_query,
+        r.detected_at
+    FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
+    JOIN latest_invocation i ON r.invocation_id = i.invocation_id
+    LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
+    WHERE r.status IN ('fail', 'error', 'warn')
+    ORDER BY
+        CASE r.status WHEN 'error' THEN 0 WHEN 'fail' THEN 0 ELSE 1 END,
+        r.table_name,
+        test_name
+    """
+    return run_query(query)
