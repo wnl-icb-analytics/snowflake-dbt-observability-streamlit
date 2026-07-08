@@ -10,6 +10,8 @@ from services.runs_service import (
     get_invocation_models,
     get_invocation_tests,
 )
+from services.alerts_service import get_downstream_skips
+from components.issue_cards import render_model_error_card, render_test_issue_card
 
 
 def _format_duration(seconds) -> str:
@@ -115,9 +117,11 @@ def render(search_filter: str = ""):
         tests_failed = int(row.get("TESTS_FAILED") or 0)
         tests_warned = int(row.get("TESTS_WARNED") or 0)
 
-        # Status icon - include test failures
+        # Red if anything failed, yellow if only warnings, white if only skips, else green.
         if fail > 0 or tests_failed > 0:
             status_icon = "🔴"
+        elif tests_warned > 0:
+            status_icon = "🟡"
         elif skipped > 0 and success == 0:
             status_icon = "⚪"
         else:
@@ -138,10 +142,12 @@ def render(search_filter: str = ""):
                     st.caption(_truncate(row["SELECTED"], 60))
             with cols[1]:
                 st.caption("Models")
+                model_parts = [f"🟢 {success}"]
                 if fail > 0:
-                    st.write(f"🟢 {success} 🔴 {fail}")
-                else:
-                    st.write(f"🟢 {success}")
+                    model_parts.append(f"🔴 {fail}")
+                if skipped > 0:
+                    model_parts.append(f"⚪ {skipped}")
+                st.write(" ".join(model_parts))
                 # Test stats
                 if tests_run > 0:
                     st.caption("Tests")
@@ -218,17 +224,16 @@ def _render_invocation_detail(invocation_id: str):
 
 
 def _render_invocation_models(invocation_id: str):
-    """Render models for an invocation."""
+    """Render models for an invocation - failures as rich cards."""
     df = get_invocation_models(invocation_id)
 
     if df.empty:
         st.info("No model runs in this invocation")
         return
 
-    # Summary
     success = len(df[df["STATUS"] == "success"])
-    fail = len(df[df["STATUS"].isin(["fail", "error"])])
-    skipped = len(df[df["STATUS"] == "skipped"])
+    fail_df = df[df["STATUS"].isin(["fail", "error"])]
+    skipped_df = df[df["STATUS"] == "skipped"]
 
     summary_cols = st.columns(4)
     with summary_cols[0]:
@@ -236,62 +241,55 @@ def _render_invocation_models(invocation_id: str):
     with summary_cols[1]:
         st.metric("Success", success)
     with summary_cols[2]:
-        st.metric("Failed", fail)
+        st.metric("Failed", len(fail_df))
     with summary_cols[3]:
-        st.metric("Skipped", skipped)
+        st.metric("Skipped", len(skipped_df))
 
     st.divider()
 
-    # Model list - show failures first
-    df_sorted = df.sort_values(
-        by="STATUS",
-        key=lambda x: x.map({"fail": 0, "error": 0, "skipped": 1, "success": 2})
-    )
+    # Blast radius per failure, when this run skipped models downstream.
+    skips_map = {}
+    if not skipped_df.empty and not fail_df.empty:
+        ds = get_downstream_skips(invocation_id)
+        skips_map = {r["UNIQUE_ID"]: int(r["DOWNSTREAM_SKIPPED"]) for _, r in ds.iterrows()}
 
-    for _, row in df_sorted.iterrows():
-        status = row["STATUS"].lower()
-        if status == "success":
-            status_icon = "🟢"
-        elif status == "skipped":
-            status_icon = "⚪"
-        else:
-            status_icon = "🔴"
+    if not fail_df.empty:
+        st.markdown("**Failures**")
+        for _, row in fail_df.iterrows():
+            uid = row.get("UNIQUE_ID")
+            uid = str(uid) if pd.notna(uid) else None
+            time_str = f"{row['EXECUTION_TIME']:.1f}s" if row.get("EXECUTION_TIME") else ""
+            meta = " · ".join(p for p in [row["STATUS"].upper(), time_str, row.get("MODEL_PATH") or ""] if p)
+            render_model_error_card(
+                object_name=row["NAME"],
+                message=row.get("MESSAGE"),
+                unique_id=uid,
+                meta_line=meta,
+                key_prefix="inv_model",
+                downstream_skipped=skips_map.get(uid),
+            )
+    else:
+        st.success("No model failures in this run")
 
-        time_str = f"{row['EXECUTION_TIME']:.1f}s" if row["EXECUTION_TIME"] else ""
-
-        with st.container(border=True):
-            cols = st.columns([3, 1, 1, 1])
-            with cols[0]:
-                st.markdown(f"{status_icon} **{row['NAME']}**")
-                if row.get("MODEL_PATH"):
-                    st.caption(_truncate(row["MODEL_PATH"], 60))
-            with cols[1]:
-                st.caption("Status")
-                st.write(status.upper())
-            with cols[2]:
-                if time_str:
-                    st.caption("Time")
-                    st.write(time_str)
-            with cols[3]:
-                if st.button("View", key=f"inv_model_{row['UNIQUE_ID']}"):
-                    st.session_state["selected_model"] = row["UNIQUE_ID"]
-                    st.session_state["selected_invocation"] = None
-                    st.rerun()
-
-            if row.get("MESSAGE") and status in ("fail", "error"):
-                st.error(row["MESSAGE"])
+    if not skipped_df.empty:
+        with st.expander(f"Skipped models ({len(skipped_df)})", expanded=False):
+            st.dataframe(
+                skipped_df[["NAME", "SCHEMA_NAME"]].rename(columns={"NAME": "Model", "SCHEMA_NAME": "Schema"}),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def _render_invocation_tests(invocation_id: str):
-    """Render tests for an invocation."""
+    """Render tests for an invocation - failures/warnings as rich cards."""
     df = get_invocation_tests(invocation_id)
 
     if df.empty:
         st.info("No test runs in this invocation")
         return
 
-    # Summary
     passed = len(df[df["STATUS"] == "pass"])
+    issue_df = df[df["STATUS"].isin(["fail", "error", "warn"])]
     failed = len(df[df["STATUS"].isin(["fail", "error"])])
     warned = len(df[df["STATUS"] == "warn"])
 
@@ -307,35 +305,12 @@ def _render_invocation_tests(invocation_id: str):
 
     st.divider()
 
-    for _, row in df.iterrows():
-        status = row["STATUS"].lower()
-        if status == "pass":
-            status_icon = "🟢"
-        elif status == "warn":
-            status_icon = "🟡"
-        else:
-            status_icon = "🔴"
+    if issue_df.empty:
+        st.success("All tests passed in this run")
+        return
 
-        with st.container(border=True):
-            cols = st.columns([3, 1, 1])
-            with cols[0]:
-                st.markdown(f"{status_icon} **{row['MODEL_NAME'] or 'N/A'}**")
-                test_ns = row.get("TEST_NAMESPACE") or ""
-                st.caption(f"{row['TEST_NAME']} | {test_ns}" if test_ns else row["TEST_NAME"])
-            with cols[1]:
-                st.caption("Status")
-                st.write(status.upper())
-            with cols[2]:
-                if st.button("View", key=f"inv_test_{row['TEST_UNIQUE_ID']}"):
-                    st.session_state["selected_test"] = row["TEST_UNIQUE_ID"]
-                    st.session_state["selected_invocation"] = None
-                    st.rerun()
-
-            if row.get("TEST_RESULTS_DESCRIPTION") and status in ("fail", "error", "warn"):
-                if status == "warn":
-                    st.warning(row["TEST_RESULTS_DESCRIPTION"])
-                else:
-                    st.error(row["TEST_RESULTS_DESCRIPTION"])
+    for _, row in issue_df.iterrows():
+        render_test_issue_card(row, key_prefix="inv_test")
 
 
 def _render_waterfall_chart(invocation_id: str, details):
