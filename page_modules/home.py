@@ -197,9 +197,42 @@ def _accepted_values(test_params):
     return None
 
 
+def _present(value) -> bool:
+    """True when a dataframe value holds real content (not None/NaN/empty)."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return False
+    return str(value).strip() not in ("", "{}", "[]")
+
+
+def _model_fqn(row):
+    """Fully-qualified model relation from the joined dbt_models columns."""
+    parts = [row.get("MODEL_DATABASE"), row.get("MODEL_SCHEMA"), row.get("MODEL_RELATION")]
+    if all(_present(p) for p in parts):
+        return ".".join(str(p) for p in parts)
+    return None
+
+
+def _inspect_query(kind, model_fqn, column, accepted):
+    """Reconstruct a query to see the offending rows for the common test kinds.
+    Elementary only stores this when store_failures is on, so we derive it."""
+    if not model_fqn or not _present(column):
+        return None
+    if kind == "accepted_values" and accepted:
+        vals = ", ".join("'" + v.replace("'", "''") + "'" for v in accepted)
+        return (
+            f"SELECT {column}, COUNT(*) AS failing_rows\n"
+            f"FROM {model_fqn}\n"
+            f"WHERE {column} IS NOT NULL AND {column} NOT IN ({vals})\n"
+            f"GROUP BY {column}\nORDER BY failing_rows DESC;"
+        )
+    if kind == "not_null":
+        return f"SELECT *\nFROM {model_fqn}\nWHERE {column} IS NULL\nLIMIT 100;"
+    return None
+
+
 def _render_test_issue_card(row, key_prefix):
     """Expandable card for one failing/warning test: what it checks, how many
-    rows failed, accepted values, sample rows/query, and a drill-in."""
+    rows failed, accepted values, source, sample rows/query, and a drill-in."""
     status = (row.get("STATUS") or "").lower()
     icon = "🟡" if status == "warn" else "🔴"
     kind = _test_kind(row.get("TEST_NAME"), row.get("TEST_NAMESPACE"))
@@ -210,14 +243,15 @@ def _render_test_issue_card(row, key_prefix):
         meta = " · ".join(p for p in [
             _format_issue_status(row.get("STATUS")),
             row.get("TEST_NAMESPACE") or "",
+            (row.get("SEVERITY") or "").lower(),
             _format_timestamp(row.get("DETECTED_AT")),
         ] if p)
         st.caption(meta)
 
         failures = row.get("FAILURES")
-        if failures is None or (isinstance(failures, float) and pd.isna(failures)):
+        if not _present(failures):
             failures = row.get("FAILED_ROW_COUNT")
-        if failures is not None and not (isinstance(failures, float) and pd.isna(failures)):
+        if _present(failures):
             try:
                 st.markdown(f"**Failing rows:** {int(failures)}")
             except (TypeError, ValueError):
@@ -231,20 +265,25 @@ def _render_test_issue_card(row, key_prefix):
         if desc and str(desc).strip().lower() not in ("", "warn", "fail", "error", "pass"):
             (st.warning if status == "warn" else st.error)(str(desc))
 
+        # Sample rows / query, when elementary captured them (store_failures on).
         result_rows = row.get("RESULT_ROWS")
-        if result_rows and str(result_rows).strip():
+        if _present(result_rows):
             st.markdown("**Sample failing rows:**")
             st.code(str(result_rows), language="json")
 
         query = row.get("TEST_RESULTS_QUERY")
-        if query and str(query).strip():
+        if _present(query):
             st.markdown("**Query to inspect failing rows:**")
             st.code(str(query), language="sql")
+        else:
+            # Elementary didn't store one; reconstruct for the common test kinds.
+            derived = _inspect_query(kind, _model_fqn(row), row.get("COLUMN_NAME"), accepted)
+            if derived:
+                st.markdown("**Inspect failing rows** (reconstructed):")
+                st.code(derived, language="sql")
 
-        params = row.get("TEST_PARAMS")
-        if params and str(params).strip() and not accepted:
-            st.markdown("**Test parameters:**")
-            st.code(str(params), language="json")
+        if _present(row.get("ORIGINAL_PATH")):
+            st.markdown(f"**Source:** `{row['ORIGINAL_PATH']}`")
 
         tuid = row.get("TEST_UNIQUE_ID")
         if tuid and pd.notna(tuid) and st.button("View test", key=f"{key_prefix}_{tuid}"):

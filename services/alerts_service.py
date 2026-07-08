@@ -590,10 +590,17 @@ def get_latest_build_test_results():
         r.result_rows,
         r.test_results_description,
         r.test_results_query,
-        r.detected_at
+        r.detected_at,
+        t.original_path,
+        t.description as test_description,
+        t.severity,
+        m.database_name as model_database,
+        m.schema_name as model_schema,
+        COALESCE(m.alias, m.name) as model_relation
     FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
     JOIN latest_invocation i ON r.invocation_id = i.invocation_id
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
+    LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON m.unique_id = t.parent_model_unique_id
     WHERE r.status IN ('fail', 'error', 'warn')
     ORDER BY
         CASE r.status WHEN 'error' THEN 0 WHEN 'fail' THEN 0 ELSE 1 END,
