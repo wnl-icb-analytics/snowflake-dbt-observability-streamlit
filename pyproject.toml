@@ -1,0 +1,22 @@
+# Dependency spec for Streamlit in Snowflake "Run on container" runtime.
+# Streamlit, snowpark, pandas and altair are pre-installed in the container
+# image, so the app runs against those defaults with no External Access
+# Integration. To pin a different version, add an EAI for PyPI first:
+# https://docs.snowflake.com/en/developer-guide/streamlit/additional-features#external-network-access-in-sis
+# Warehouse (legacy) runtime uses environment.yml instead.
+
+[project]
+name = "dbt-observability"
+requires-python = "~=3.11.0"
+version = "0.1.0"
+description = "dbt observability dashboard"
+dependencies = [
+    "streamlit[snowflake]"
+]
+
+[tool.uv]
+constraint-dependencies = ["numba>=0.56.0"]
+exclude-newer = "7 days"
+
+[tool.uv.exclude-newer-package]
+streamlit = false
