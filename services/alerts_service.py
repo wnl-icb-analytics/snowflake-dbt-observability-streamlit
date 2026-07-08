@@ -213,6 +213,7 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
     WITH model_all AS (
         SELECT
             r.name as object_name,
+            r.unique_id,
             'Model' as issue_type,
             r.status,
             r.generated_at as event_at,
@@ -243,6 +244,7 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
     model_latest AS (
         SELECT
             ma.object_name,
+            ma.unique_id,
             ma.status as current_status
         FROM model_all ma
         JOIN current_models cm USING (object_name)
@@ -414,7 +416,8 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         NULL as affected_checks,
         a.first_issue_at,
         a.last_issue_at,
-        m.sample_message
+        m.sample_message,
+        l.unique_id
     FROM model_agg a
     JOIN model_latest l USING (object_name)
     LEFT JOIN model_failure_message m USING (object_name)
@@ -435,7 +438,8 @@ def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         affected_checks,
         first_issue_at,
         last_issue_at,
-        sample_message
+        sample_message,
+        NULL as unique_id
     FROM test_agg
     WHERE currently_failing_checks > 0
     ORDER BY failure_count DESC, last_issue_at DESC
@@ -460,7 +464,8 @@ def get_latest_run_issues():
             r.status as current_status,
             1 as issue_count,
             i.created_at as event_at,
-            r.message as summary
+            r.message as summary,
+            r.unique_id as unique_id
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
         JOIN latest_invocation i ON r.invocation_id = i.invocation_id
         WHERE r.resource_type = 'model'
@@ -473,7 +478,8 @@ def get_latest_run_issues():
             CASE WHEN r.status = 'warn' THEN 'warn' ELSE 'fail' END as current_status,
             COUNT(*) as issue_count,
             i.created_at as event_at,
-            ANY_VALUE(COALESCE(t.short_name, r.test_name)) as summary
+            ANY_VALUE(COALESCE(t.short_name, r.test_name)) as summary,
+            NULL as unique_id
         FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
         JOIN latest_invocation i ON r.invocation_id = i.invocation_id
         LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id

@@ -1,6 +1,7 @@
 """Home page - Overview dashboard with KPIs."""
 
 import os
+import re
 import pandas as pd
 import streamlit as st
 from services.metrics_service import get_dashboard_kpis, get_recent_runs, get_project_totals, get_total_execution_time
@@ -91,6 +92,75 @@ def _format_issue_status(status: str) -> str:
     return status.title() if status else "Unknown"
 
 
+# Patterns for pulling structured fields out of a dbt/Snowflake error message.
+_ERROR_CLASS_RE = re.compile(r"([A-Za-z][A-Za-z ]*?Error)\s+in\s+(?:model|test|seed|snapshot)", re.I)
+_SNOWFLAKE_CODE_RE = re.compile(r"\[Snowflake\]\s*(\d+)\s*\(([0-9A-Za-z]+)\)")
+_MISSING_OBJECT_RE = re.compile(r"Object '([^']+)' does not exist or not authorized", re.I)
+_INVALID_IDENTIFIER_RE = re.compile(r"invalid identifier '([^']+)'", re.I)
+_COMPILED_LOC_RE = re.compile(r"\(in (compiled/[^)]+)\)")
+
+
+def _categorize_error(message: str) -> str:
+    """Map an error message to a short category label."""
+    m = (message or "").lower()
+    if "does not exist or not authorized" in m:
+        return "Missing or unauthorized object"
+    if "invalid identifier" in m:
+        return "Invalid identifier"
+    if "out of sync" in m or "on_schema_change" in m:
+        return "Incremental schema drift"
+    if "syntax error" in m or "compilation error" in m:
+        return "SQL compilation error"
+    return "Model failure"
+
+
+def _parse_model_error(message: str) -> dict:
+    """Extract structured fields (error class, Snowflake code, offending object,
+    compiled file location) from a raw dbt run message."""
+    msg = message or ""
+    out = {"category": _categorize_error(msg)}
+    for key, pattern in (
+        ("error_class", _ERROR_CLASS_RE),
+        ("missing_object", _MISSING_OBJECT_RE),
+        ("invalid_identifier", _INVALID_IDENTIFIER_RE),
+        ("compiled_location", _COMPILED_LOC_RE),
+    ):
+        m = pattern.search(msg)
+        if m:
+            out[key] = m.group(1)
+    code = _SNOWFLAKE_CODE_RE.search(msg)
+    if code:
+        out["snowflake_code"] = f"{code.group(1)} ({code.group(2)})"
+    return out
+
+
+def _render_model_error_card(object_name, message, unique_id, meta_line, key_prefix):
+    """Expandable card for one failing model: parsed fields + full error + drill-in."""
+    parsed = _parse_model_error(message)
+    with st.expander(f"🔴 {object_name} — {parsed['category']}", expanded=False):
+        if meta_line:
+            st.caption(meta_line)
+        if parsed.get("error_class"):
+            st.markdown(f"**Error type:** {parsed['error_class']}")
+        if parsed.get("snowflake_code"):
+            st.markdown(f"**Snowflake code:** `{parsed['snowflake_code']}`")
+        if parsed.get("missing_object"):
+            st.markdown(f"**Missing / unauthorized object:** `{parsed['missing_object']}`")
+        if parsed.get("invalid_identifier"):
+            st.markdown(f"**Invalid identifier:** `{parsed['invalid_identifier']}`")
+        if parsed.get("compiled_location"):
+            st.markdown(f"**Compiled SQL:** `{parsed['compiled_location']}`")
+        if message:
+            st.markdown("**Full error:**")
+            st.code(str(message), language="text")
+        else:
+            st.caption("No error message captured for this run.")
+        if unique_id and st.button("View model", key=f"{key_prefix}_view_{unique_id}"):
+            st.session_state["selected_model"] = unique_id
+            st.session_state["selected_test"] = None
+            st.rerun()
+
+
 def _summarize_issue(row) -> str:
     """Build a short human-readable summary for the current issue table."""
     issue_type = row["ISSUE_TYPE"]
@@ -125,29 +195,53 @@ def _render_current_issues(days: int):
         st.success("No open or recurring issues")
         return
 
-    display_df = issues_df.copy()
-    display_df["STATUS_LABEL"] = display_df["CURRENT_STATUS"].map(_format_issue_status)
-    display_df["SUMMARY"] = display_df.apply(_summarize_issue, axis=1)
-    display_df["FIRST_SEEN"] = display_df["FIRST_ISSUE_AT"].map(_format_relative_time)
-    display_df["LAST_SEEN"] = display_df["LAST_ISSUE_AT"].map(_format_relative_time)
+    model_df = issues_df[issues_df["ISSUE_TYPE"] == "Model"]
+    test_df = issues_df[issues_df["ISSUE_TYPE"] != "Model"]
 
-    display_df = display_df.rename(
-        columns={
-            "OBJECT_NAME": "Object",
-            "ISSUE_TYPE": "Type",
-            "STATUS_LABEL": "Status",
-            "FAILURE_COUNT": f"Failures ({days}d)",
-            "FIRST_SEEN": "Streak Started",
-            "LAST_SEEN": "Last Seen",
-            "SUMMARY": "Summary",
-        }
-    )
+    if not model_df.empty:
+        st.markdown("**Model failures**")
+        for _, row in model_df.iterrows():
+            uid = row.get("UNIQUE_ID")
+            fails = int(row["FAILURE_COUNT"] or 0)
+            meta = (
+                f"{_format_issue_status(row['CURRENT_STATUS'])} · "
+                f"{fails} failures in {days}d · "
+                f"streak since {_format_relative_time(row['FIRST_ISSUE_AT'])} · "
+                f"last {_format_relative_time(row['LAST_ISSUE_AT'])}"
+            )
+            _render_model_error_card(
+                object_name=row["OBJECT_NAME"],
+                message=row.get("SAMPLE_MESSAGE"),
+                unique_id=str(uid) if pd.notna(uid) else None,
+                meta_line=meta,
+                key_prefix="current",
+            )
 
-    st.dataframe(
-        display_df[["Object", "Type", "Status", f"Failures ({days}d)", "Streak Started", "Last Seen", "Summary"]],
-        use_container_width=True,
-        hide_index=True,
-    )
+    if not test_df.empty:
+        st.markdown("**Test areas**")
+        display_df = test_df.copy()
+        display_df["STATUS_LABEL"] = display_df["CURRENT_STATUS"].map(_format_issue_status)
+        display_df["SUMMARY"] = display_df.apply(_summarize_issue, axis=1)
+        display_df["FIRST_SEEN"] = display_df["FIRST_ISSUE_AT"].map(_format_relative_time)
+        display_df["LAST_SEEN"] = display_df["LAST_ISSUE_AT"].map(_format_relative_time)
+
+        display_df = display_df.rename(
+            columns={
+                "OBJECT_NAME": "Object",
+                "ISSUE_TYPE": "Type",
+                "STATUS_LABEL": "Status",
+                "FAILURE_COUNT": f"Failures ({days}d)",
+                "FIRST_SEEN": "Streak Started",
+                "LAST_SEEN": "Last Seen",
+                "SUMMARY": "Summary",
+            }
+        )
+
+        st.dataframe(
+            display_df[["Object", "Type", "Status", f"Failures ({days}d)", "Streak Started", "Last Seen", "Summary"]],
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 def _render_latest_run_issues():
@@ -161,27 +255,45 @@ def _render_latest_run_issues():
         st.success("Latest build completed without failures or warnings")
         return
 
-    display_df = latest_df.copy()
-    display_df["STATUS_LABEL"] = display_df["CURRENT_STATUS"].map(_format_issue_status)
-    display_df["EVENT_AT"] = display_df["EVENT_AT"].map(_format_timestamp)
-    display_df["SUMMARY"] = display_df["SUMMARY"].fillna("").map(lambda x: _truncate(str(x).replace("\n", " "), 90))
+    model_df = latest_df[latest_df["ISSUE_TYPE"] == "Model"]
+    test_df = latest_df[latest_df["ISSUE_TYPE"] != "Model"]
 
-    display_df = display_df.rename(
-        columns={
-            "OBJECT_NAME": "Object",
-            "ISSUE_TYPE": "Type",
-            "STATUS_LABEL": "Status",
-            "ISSUE_COUNT": "Count",
-            "EVENT_AT": "Run Time",
-            "SUMMARY": "Summary",
-        }
-    )
+    if not model_df.empty:
+        st.markdown("**Model failures**")
+        for _, row in model_df.iterrows():
+            uid = row.get("UNIQUE_ID")
+            meta = f"{_format_issue_status(row['CURRENT_STATUS'])} · {_format_timestamp(row['EVENT_AT'])}"
+            _render_model_error_card(
+                object_name=row["OBJECT_NAME"],
+                message=row.get("SUMMARY"),
+                unique_id=str(uid) if pd.notna(uid) else None,
+                meta_line=meta,
+                key_prefix="latest",
+            )
 
-    st.dataframe(
-        display_df[["Object", "Type", "Status", "Count", "Run Time", "Summary"]],
-        use_container_width=True,
-        hide_index=True,
-    )
+    if not test_df.empty:
+        st.markdown("**Test issues**")
+        display_df = test_df.copy()
+        display_df["STATUS_LABEL"] = display_df["CURRENT_STATUS"].map(_format_issue_status)
+        display_df["EVENT_AT"] = display_df["EVENT_AT"].map(_format_timestamp)
+        display_df["SUMMARY"] = display_df["SUMMARY"].fillna("").map(lambda x: _truncate(str(x).replace("\n", " "), 90))
+
+        display_df = display_df.rename(
+            columns={
+                "OBJECT_NAME": "Object",
+                "ISSUE_TYPE": "Type",
+                "STATUS_LABEL": "Status",
+                "ISSUE_COUNT": "Count",
+                "EVENT_AT": "Run Time",
+                "SUMMARY": "Summary",
+            }
+        )
+
+        st.dataframe(
+            display_df[["Object", "Type", "Status", "Count", "Run Time", "Summary"]],
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 
