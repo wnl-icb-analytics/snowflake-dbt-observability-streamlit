@@ -582,6 +582,36 @@ def get_downstream_skips(invocation_id: str):
     return run_query(query)
 
 
+def get_downstream_model_counts(unique_ids):
+    """Transitive count of models that depend on each given model (static DAG
+    impact / dependents), walking dbt_models.depends_on_nodes."""
+    ids = [str(u) for u in unique_ids if u]
+    if not ids:
+        return run_query("SELECT NULL AS unique_id, 0 AS downstream_count WHERE 1=0")
+    values = ", ".join("('" + i.replace("'", "''") + "')" for i in ids)
+    query = f"""
+    WITH edges AS (
+        SELECT m.unique_id AS child, f.value::string AS parent
+        FROM {ELEMENTARY_SCHEMA}.dbt_models m,
+             LATERAL FLATTEN(input => PARSE_JSON(m.depends_on_nodes)) f
+    ),
+    roots AS (SELECT column1 AS unique_id FROM VALUES {values}),
+    downstream(root, node, depth) AS (
+        SELECT unique_id, unique_id, 0 FROM roots
+        UNION ALL
+        SELECT d.root, e.child, d.depth + 1
+        FROM downstream d
+        JOIN edges e ON e.parent = d.node
+        WHERE d.depth < 50
+    )
+    SELECT root AS unique_id,
+           COUNT(DISTINCT CASE WHEN node <> root THEN node END) AS downstream_count
+    FROM downstream
+    GROUP BY root
+    """
+    return run_query(query)
+
+
 def get_latest_build_test_results():
     """Per-test failures/warnings from the most recent build, with the detail
     needed to see what broke (accepted values, failing-row count, sample rows,

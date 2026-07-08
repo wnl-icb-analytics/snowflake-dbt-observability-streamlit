@@ -9,6 +9,7 @@ from services.alerts_service import (
     get_latest_run_issues,
     get_latest_build_summary,
     get_downstream_skips,
+    get_downstream_model_counts,
     get_latest_build_test_results,
 )
 from components.issue_cards import (
@@ -66,8 +67,15 @@ def _render_current_issues(days: int):
 
     if not model_df.empty:
         st.markdown("**Model failures**")
+        # Static DAG impact: how many models depend on each failing model.
+        model_uids = [str(u) for u in model_df["UNIQUE_ID"].tolist() if pd.notna(u)]
+        impact_map = {}
+        if model_uids:
+            dc = get_downstream_model_counts(model_uids)
+            impact_map = {r["UNIQUE_ID"]: int(r["DOWNSTREAM_COUNT"]) for _, r in dc.iterrows()}
         for _, row in model_df.iterrows():
             uid = row.get("UNIQUE_ID")
+            uid = str(uid) if pd.notna(uid) else None
             fails = int(row["FAILURE_COUNT"] or 0)
             meta = (
                 f"{_format_issue_status(row['CURRENT_STATUS'])} · "
@@ -78,9 +86,10 @@ def _render_current_issues(days: int):
             _render_model_error_card(
                 object_name=row["OBJECT_NAME"],
                 message=row.get("SAMPLE_MESSAGE"),
-                unique_id=str(uid) if pd.notna(uid) else None,
+                unique_id=uid,
                 meta_line=meta,
                 key_prefix="current",
+                downstream_total=impact_map.get(uid),
             )
 
     if not test_df.empty:

@@ -128,18 +128,28 @@ def parse_model_error(message: str) -> dict:
     return out
 
 
-def render_model_error_card(object_name, message, unique_id, meta_line, key_prefix, downstream_skipped=None):
+def render_model_error_card(object_name, message, unique_id, meta_line, key_prefix,
+                            downstream_skipped=None, downstream_total=None):
     """Expandable card for one failing model: parsed fields + full error + drill-in.
-    downstream_skipped, when set, is the blast radius (models skipped downstream in the run)."""
+    downstream_skipped = models skipped downstream in a specific run (run blast radius).
+    downstream_total = models that transitively depend on this one (static DAG impact)."""
     parsed = parse_model_error(message)
     title = f"🔴 {object_name} — {parsed['category']}"
     if downstream_skipped:
         title += f" · {downstream_skipped} skipped downstream"
+    elif downstream_total:
+        title += f" · {downstream_total} downstream"
     with st.expander(title, expanded=False):
         if meta_line:
             st.caption(meta_line)
         if downstream_skipped:
             st.markdown(f"**Blast radius:** {downstream_skipped} downstream model(s) skipped in this run")
+        if downstream_total is not None:
+            if downstream_total > 0:
+                st.markdown(f"**Impact:** {downstream_total} downstream model(s) depend on this")
+            else:
+                st.markdown("**Impact:** terminal model — no dbt models depend on it "
+                            "(any consumers are outside dbt, e.g. views/BI)")
         if parsed.get("error_class"):
             st.markdown(f"**Error type:** {parsed['error_class']}")
         if parsed.get("snowflake_code"):
