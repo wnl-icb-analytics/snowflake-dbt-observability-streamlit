@@ -5,7 +5,12 @@ import re
 import pandas as pd
 import streamlit as st
 from services.metrics_service import get_dashboard_kpis, get_recent_runs, get_project_totals, get_total_execution_time
-from services.alerts_service import get_current_issue_summary, get_latest_run_issues
+from services.alerts_service import (
+    get_current_issue_summary,
+    get_latest_run_issues,
+    get_latest_build_summary,
+    get_downstream_skips,
+)
 
 DBT_LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "dbt-logo.svg")
 
@@ -134,12 +139,18 @@ def _parse_model_error(message: str) -> dict:
     return out
 
 
-def _render_model_error_card(object_name, message, unique_id, meta_line, key_prefix):
-    """Expandable card for one failing model: parsed fields + full error + drill-in."""
+def _render_model_error_card(object_name, message, unique_id, meta_line, key_prefix, downstream_skipped=None):
+    """Expandable card for one failing model: parsed fields + full error + drill-in.
+    downstream_skipped, when set, is the blast radius (models skipped downstream in the run)."""
     parsed = _parse_model_error(message)
-    with st.expander(f"🔴 {object_name} — {parsed['category']}", expanded=False):
+    title = f"🔴 {object_name} — {parsed['category']}"
+    if downstream_skipped:
+        title += f" · {downstream_skipped} skipped downstream"
+    with st.expander(title, expanded=False):
         if meta_line:
             st.caption(meta_line)
+        if downstream_skipped:
+            st.markdown(f"**Blast radius:** {downstream_skipped} downstream model(s) skipped in this run")
         if parsed.get("error_class"):
             st.markdown(f"**Error type:** {parsed['error_class']}")
         if parsed.get("snowflake_code"):
@@ -246,14 +257,34 @@ def _render_current_issues(days: int):
 
 def _render_latest_run_issues():
     """Render issues from the most recent build invocation."""
+    summary = get_latest_build_summary()
     latest_df = get_latest_run_issues()
 
     st.subheader("Latest Build Issues")
-    st.caption("Failures and warnings from the most recent dbt build invocation.")
+
+    skipped_count = 0
+    invocation_id = None
+    if not summary.empty:
+        s = summary.iloc[0]
+        skipped_count = int(s["SKIPPED_COUNT"] or 0)
+        invocation_id = s["INVOCATION_ID"]
+        st.caption(
+            f"Most recent build · 🟢 {int(s['SUCCESS_COUNT'] or 0)} success · "
+            f"🔴 {int(s['FAILED_COUNT'] or 0)} failed · ⚪ {skipped_count} skipped · "
+            f"{_format_relative_time(s['CREATED_AT'])}"
+        )
+    else:
+        st.caption("Failures and warnings from the most recent dbt build invocation.")
 
     if latest_df.empty:
         st.success("Latest build completed without failures or warnings")
         return
+
+    # Blast radius: only run the DAG walk when the build actually skipped models.
+    skips_map = {}
+    if skipped_count > 0 and invocation_id:
+        ds = get_downstream_skips(invocation_id)
+        skips_map = {r["UNIQUE_ID"]: int(r["DOWNSTREAM_SKIPPED"]) for _, r in ds.iterrows()}
 
     model_df = latest_df[latest_df["ISSUE_TYPE"] == "Model"]
     test_df = latest_df[latest_df["ISSUE_TYPE"] != "Model"]
@@ -262,13 +293,15 @@ def _render_latest_run_issues():
         st.markdown("**Model failures**")
         for _, row in model_df.iterrows():
             uid = row.get("UNIQUE_ID")
+            uid = str(uid) if pd.notna(uid) else None
             meta = f"{_format_issue_status(row['CURRENT_STATUS'])} · {_format_timestamp(row['EVENT_AT'])}"
             _render_model_error_card(
                 object_name=row["OBJECT_NAME"],
                 message=row.get("SUMMARY"),
-                unique_id=str(uid) if pd.notna(uid) else None,
+                unique_id=uid,
                 meta_line=meta,
                 key_prefix="latest",
+                downstream_skipped=skips_map.get(uid),
             )
 
     if not test_df.empty:

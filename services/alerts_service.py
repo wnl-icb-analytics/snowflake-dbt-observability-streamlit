@@ -498,3 +498,68 @@ def get_latest_run_issues():
         object_name
     """
     return run_query(query)
+
+
+def get_latest_build_summary():
+    """Model status breakdown for the most recent build invocation.
+    Used to surface skip count and ground failures with impact."""
+    query = f"""
+    WITH latest_invocation AS (
+        SELECT invocation_id, created_at
+        FROM {ELEMENTARY_SCHEMA}.dbt_invocations
+        WHERE LOWER(command) LIKE '%build%'
+        ORDER BY created_at DESC
+        LIMIT 1
+    )
+    SELECT
+        i.invocation_id,
+        i.created_at,
+        COUNT_IF(r.status = 'success') as success_count,
+        COUNT_IF(r.status IN ('fail', 'error')) as failed_count,
+        COUNT_IF(r.status = 'skipped') as skipped_count,
+        COUNT(*) as total_count
+    FROM latest_invocation i
+    LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_run_results r
+        ON r.invocation_id = i.invocation_id
+       AND r.resource_type = 'model'
+    GROUP BY i.invocation_id, i.created_at
+    """
+    return run_query(query)
+
+
+def get_downstream_skips(invocation_id: str):
+    """Per-failing-model blast radius: count of downstream models skipped in the
+    same invocation. Walks the model DAG (dbt_models.depends_on_nodes) from each
+    errored model and intersects with models skipped in that run.
+
+    Note: a skipped model downstream of several failures counts for each root, so
+    these are blast-radius figures and do not sum to the run's total skip count.
+    """
+    query = f"""
+    WITH edges AS (
+        SELECT m.unique_id AS child, f.value::string AS parent
+        FROM {ELEMENTARY_SCHEMA}.dbt_models m,
+             LATERAL FLATTEN(input => PARSE_JSON(m.depends_on_nodes)) f
+    ),
+    run AS (
+        SELECT unique_id, status
+        FROM {ELEMENTARY_SCHEMA}.dbt_run_results
+        WHERE invocation_id = '{invocation_id}'
+          AND resource_type = 'model'
+    ),
+    errored AS (SELECT unique_id FROM run WHERE status IN ('error', 'fail')),
+    skipped AS (SELECT unique_id FROM run WHERE status = 'skipped'),
+    downstream(root, node, depth) AS (
+        SELECT unique_id, unique_id, 0 FROM errored
+        UNION ALL
+        SELECT d.root, e.child, d.depth + 1
+        FROM downstream d
+        JOIN edges e ON e.parent = d.node
+        WHERE d.depth < 50
+    )
+    SELECT d.root AS unique_id, COUNT(DISTINCT s.unique_id) AS downstream_skipped
+    FROM downstream d
+    JOIN skipped s ON s.unique_id = d.node
+    GROUP BY d.root
+    """
+    return run_query(query)
