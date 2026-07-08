@@ -137,8 +137,11 @@ def render_model_error_card(object_name, message, unique_id, meta_line, key_pref
     title = f"🔴 {object_name} — {parsed['category']}"
     if downstream_skipped:
         title += f" · {downstream_skipped} skipped downstream"
-    elif downstream_total:
-        title += f" · {downstream_total} downstream"
+    elif downstream_total is not None:
+        if downstream_total > 0:
+            title += f" · {downstream_total} downstream affected"
+        else:
+            title += " · output stale, nothing downstream"
     with st.expander(title, expanded=False):
         if meta_line:
             st.caption(meta_line)
@@ -146,10 +149,16 @@ def render_model_error_card(object_name, message, unique_id, meta_line, key_pref
             st.markdown(f"**Blast radius:** {downstream_skipped} downstream model(s) skipped in this run")
         if downstream_total is not None:
             if downstream_total > 0:
-                st.markdown(f"**Impact:** {downstream_total} downstream model(s) depend on this")
+                st.markdown(
+                    f"**Impact:** {downstream_total} other model(s) build on this one, "
+                    "so they run on stale or broken data until it's fixed."
+                )
             else:
-                st.markdown("**Impact:** terminal model — no dbt models depend on it "
-                            "(any consumers are outside dbt, e.g. views/BI)")
+                st.markdown(
+                    "**Impact:** No other dbt models build on this one, so nothing else "
+                    "in the project breaks. But its own table/view is now stale — anything "
+                    "reading it directly (dashboards, reports, other queries) is affected."
+                )
         if parsed.get("error_class"):
             st.markdown(f"**Error type:** {parsed['error_class']}")
         if parsed.get("snowflake_code"):
