@@ -13,6 +13,7 @@ from services.alerts_service import (
     get_downstream_skips,
     get_latest_build_test_results,
 )
+from database import run_query
 
 DBT_LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "dbt-logo.svg")
 
@@ -232,14 +233,29 @@ def _inspect_query(kind, model_fqn, column, accepted):
 
 def _render_test_issue_card(row, key_prefix):
     """Expandable card for one failing/warning test: what it checks, how many
-    rows failed, accepted values, source, sample rows/query, and a drill-in."""
+    rows failed, accepted values, source, and a button to pull the failing rows."""
     status = (row.get("STATUS") or "").lower()
     icon = "🟡" if status == "warn" else "🔴"
     kind = _test_kind(row.get("TEST_NAME"), row.get("TEST_NAMESPACE"))
     loc = ".".join(p for p in [row.get("TABLE_NAME") or "", row.get("COLUMN_NAME") or ""] if p)
     title = f"{icon} {kind}" + (f" — {loc}" if loc else "")
 
-    with st.expander(title, expanded=False):
+    tuid = row.get("TEST_UNIQUE_ID")
+    tuid = str(tuid) if (tuid is not None and pd.notna(tuid)) else None
+    row_key = f"{key_prefix}_rows_{tuid or loc}"
+    show_rows = st.session_state.get(row_key, False)
+
+    accepted = _accepted_values(row.get("TEST_PARAMS"))
+    # A runnable query: elementary's stored one, else reconstruct it.
+    stored_query = row.get("TEST_RESULTS_QUERY")
+    if _present(stored_query):
+        query_sql, reconstructed = str(stored_query), False
+    else:
+        query_sql = _inspect_query(kind, _model_fqn(row), row.get("COLUMN_NAME"), accepted)
+        reconstructed = bool(query_sql)
+
+    # Keep the card open across the rerun that a button click triggers.
+    with st.expander(title, expanded=show_rows):
         meta = " · ".join(p for p in [
             _format_issue_status(row.get("STATUS")),
             row.get("TEST_NAMESPACE") or "",
@@ -257,7 +273,6 @@ def _render_test_issue_card(row, key_prefix):
             except (TypeError, ValueError):
                 pass
 
-        accepted = _accepted_values(row.get("TEST_PARAMS"))
         if accepted:
             st.markdown("**Accepted values:** " + ", ".join(f"`{v}`" for v in accepted))
 
@@ -265,29 +280,42 @@ def _render_test_issue_card(row, key_prefix):
         if desc and str(desc).strip().lower() not in ("", "warn", "fail", "error", "pass"):
             (st.warning if status == "warn" else st.error)(str(desc))
 
-        # Sample rows / query, when elementary captured them (store_failures on).
         result_rows = row.get("RESULT_ROWS")
         if _present(result_rows):
             st.markdown("**Sample failing rows:**")
             st.code(str(result_rows), language="json")
 
-        query = row.get("TEST_RESULTS_QUERY")
-        if _present(query):
-            st.markdown("**Query to inspect failing rows:**")
-            st.code(str(query), language="sql")
-        else:
-            # Elementary didn't store one; reconstruct for the common test kinds.
-            derived = _inspect_query(kind, _model_fqn(row), row.get("COLUMN_NAME"), accepted)
-            if derived:
-                st.markdown("**Inspect failing rows** (reconstructed):")
-                st.code(derived, language="sql")
-
         if _present(row.get("ORIGINAL_PATH")):
             st.markdown(f"**Source:** `{row['ORIGINAL_PATH']}`")
 
-        tuid = row.get("TEST_UNIQUE_ID")
-        if tuid and pd.notna(tuid) and st.button("View test", key=f"{key_prefix}_{tuid}"):
-            st.session_state["selected_test"] = str(tuid)
+        # Run the query on demand and show the offending rows inline.
+        if query_sql:
+            btn_cols = st.columns([1, 1, 3])
+            with btn_cols[0]:
+                if st.button("Show failing rows", key=f"{row_key}_show"):
+                    st.session_state[row_key] = True
+                    st.rerun()
+            if show_rows:
+                with btn_cols[1]:
+                    if st.button("Hide", key=f"{row_key}_hide"):
+                        st.session_state[row_key] = False
+                        st.rerun()
+                try:
+                    with st.spinner("Querying failing rows..."):
+                        res = run_query(query_sql)
+                    if res.empty:
+                        st.info("Query returned no rows.")
+                    else:
+                        note = f"{len(res)} row(s)" + (" (showing first 500)" if len(res) > 500 else "")
+                        st.caption(note)
+                        st.dataframe(res.head(500), use_container_width=True, hide_index=True)
+                except Exception as e:
+                    st.error(f"Could not run query: {e}")
+                st.caption("Reconstructed query" if reconstructed else "Query captured by elementary")
+                st.code(query_sql, language="sql")
+
+        if tuid and st.button("View test", key=f"{key_prefix}_view_{tuid}"):
+            st.session_state["selected_test"] = tuid
             st.session_state["selected_model"] = None
             st.rerun()
 
