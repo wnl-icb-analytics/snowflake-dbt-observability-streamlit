@@ -158,6 +158,7 @@ def get_recent_runs(limit: int = 10):
             COUNT(*) as total_models,
             SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
             SUM(CASE WHEN status IN ('fail', 'error') THEN 1 ELSE 0 END) as fail_count,
+            SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped_count,
             SUM(execution_time) as total_time
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results
         WHERE resource_type = 'model'
@@ -186,6 +187,7 @@ def get_recent_runs(limit: int = 10):
         COALESCE(s.total_models, 0) as models_run,
         COALESCE(s.success_count, 0) as success_count,
         COALESCE(s.fail_count, 0) as fail_count,
+        COALESCE(s.skipped_count, 0) as skipped_count,
         COALESCE(s.total_time, 0) as total_time,
         TIMESTAMPDIFF('second', TRY_TO_TIMESTAMP(i.run_started_at), TRY_TO_TIMESTAMP(i.run_completed_at)) as duration_seconds,
         COALESCE(t.total_tests, 0) as tests_run,

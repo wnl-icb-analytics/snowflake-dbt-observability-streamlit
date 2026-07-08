@@ -115,18 +115,32 @@ def get_invocation_models(invocation_id: str):
 
 
 def get_invocation_tests(invocation_id: str):
-    """Get all test runs for a specific invocation."""
+    """Get all test runs for a specific invocation with the detail the issue
+    cards need (params, failing-row count, source, model FQN)."""
     query = f"""
     SELECT
         r.test_unique_id,
-        COALESCE(t.short_name, r.test_name) as test_name,
-        COALESCE(t.test_namespace, r.test_type) as test_namespace,
+        COALESCE(t.short_name, r.test_short_name, r.test_name) as test_name,
+        COALESCE(t.test_namespace, r.test_sub_type, r.test_type) as test_namespace,
+        r.table_name,
         r.table_name as model_name,
+        r.column_name,
         r.status,
+        r.failures,
+        r.failed_row_count,
+        r.test_params,
+        r.result_rows,
+        r.test_results_description,
+        r.test_results_query,
         r.detected_at,
-        r.test_results_description
+        t.original_path,
+        t.severity,
+        m.database_name as model_database,
+        m.schema_name as model_schema,
+        COALESCE(m.alias, m.name) as model_relation
     FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
+    LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON m.unique_id = t.parent_model_unique_id
     WHERE r.invocation_id = '{invocation_id}'
     ORDER BY
         CASE WHEN r.status IN ('fail', 'error') THEN 0

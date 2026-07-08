@@ -505,7 +505,7 @@ def get_latest_build_summary():
     Used to surface skip count and ground failures with impact."""
     query = f"""
     WITH latest_invocation AS (
-        SELECT invocation_id, created_at
+        SELECT invocation_id, created_at, command, selected
         FROM {ELEMENTARY_SCHEMA}.dbt_invocations
         WHERE LOWER(command) LIKE '%build%'
         ORDER BY created_at DESC
@@ -514,6 +514,8 @@ def get_latest_build_summary():
     SELECT
         i.invocation_id,
         i.created_at,
+        i.command,
+        i.selected,
         COUNT_IF(r.status = 'success') as success_count,
         COUNT_IF(r.status IN ('fail', 'error')) as failed_count,
         COUNT_IF(r.status = 'skipped') as skipped_count,
@@ -522,7 +524,7 @@ def get_latest_build_summary():
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_run_results r
         ON r.invocation_id = i.invocation_id
        AND r.resource_type = 'model'
-    GROUP BY i.invocation_id, i.created_at
+    GROUP BY i.invocation_id, i.created_at, i.command, i.selected
     """
     return run_query(query)
 
