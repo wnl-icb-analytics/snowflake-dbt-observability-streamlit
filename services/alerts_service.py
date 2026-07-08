@@ -510,21 +510,36 @@ def get_latest_build_summary():
         WHERE LOWER(command) LIKE '%build%'
         ORDER BY created_at DESC
         LIMIT 1
+    ),
+    model_agg AS (
+        SELECT
+            COUNT_IF(r.status = 'success') as success_count,
+            COUNT_IF(r.status IN ('fail', 'error')) as failed_count,
+            COUNT_IF(r.status = 'skipped') as skipped_count,
+            COUNT(*) as total_count
+        FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
+        JOIN latest_invocation i ON r.invocation_id = i.invocation_id
+        WHERE r.resource_type = 'model'
+    ),
+    test_agg AS (
+        SELECT
+            COUNT_IF(r.status IN ('fail', 'error')) as test_failed_count,
+            COUNT_IF(r.status = 'warn') as test_warned_count
+        FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
+        JOIN latest_invocation i ON r.invocation_id = i.invocation_id
     )
     SELECT
         i.invocation_id,
         i.created_at,
         i.command,
         i.selected,
-        COUNT_IF(r.status = 'success') as success_count,
-        COUNT_IF(r.status IN ('fail', 'error')) as failed_count,
-        COUNT_IF(r.status = 'skipped') as skipped_count,
-        COUNT(*) as total_count
-    FROM latest_invocation i
-    LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_run_results r
-        ON r.invocation_id = i.invocation_id
-       AND r.resource_type = 'model'
-    GROUP BY i.invocation_id, i.created_at, i.command, i.selected
+        m.success_count,
+        m.failed_count,
+        m.skipped_count,
+        m.total_count,
+        t.test_failed_count,
+        t.test_warned_count
+    FROM latest_invocation i, model_agg m, test_agg t
     """
     return run_query(query)
 

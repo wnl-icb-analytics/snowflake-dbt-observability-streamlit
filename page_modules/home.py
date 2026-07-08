@@ -123,11 +123,21 @@ def _render_latest_run_issues():
         s = summary.iloc[0]
         skipped_count = int(s["SKIPPED_COUNT"] or 0)
         invocation_id = s["INVOCATION_ID"]
-        st.caption(
-            f"Most recent build · 🟢 {int(s['SUCCESS_COUNT'] or 0)} · "
-            f"🔴 {int(s['FAILED_COUNT'] or 0)} · ⚪ {skipped_count} skipped · "
-            f"{_format_relative_time(s['CREATED_AT'])}"
+        test_failed = int(s.get("TEST_FAILED_COUNT") or 0)
+        test_warned = int(s.get("TEST_WARNED_COUNT") or 0)
+        caption = (
+            f"Most recent build · Models 🟢 {int(s['SUCCESS_COUNT'] or 0)} "
+            f"🔴 {int(s['FAILED_COUNT'] or 0)} ⚪ {skipped_count}"
         )
+        if test_failed or test_warned:
+            test_bits = []
+            if test_failed:
+                test_bits.append(f"🔴 {test_failed}")
+            if test_warned:
+                test_bits.append(f"🟡 {test_warned}")
+            caption += " · Tests " + " ".join(test_bits)
+        caption += f" · {_format_relative_time(s['CREATED_AT'])}"
+        st.caption(caption)
         sel = s.get("SELECTED")
         if sel is not None and str(sel).strip() and str(sel).lower() != "none":
             st.caption(f"Partial run — selection: `{_truncate(str(sel), 80)}`. Project-wide health is above.")
