@@ -82,7 +82,7 @@ def get_models_summary(
                 AVG(r.execution_time) OVER (PARTITION BY r.unique_id) as avg_execution_time,
                 COUNT(*) OVER (PARTITION BY r.unique_id) as run_count
             FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
-            LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON r.unique_id = m.unique_id
+            JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON r.unique_id = m.unique_id
             WHERE r.generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
             AND r.resource_type = 'model'
             {search_filter_run}

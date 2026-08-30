@@ -140,7 +140,11 @@ def get_dashboard_kpis(days: int = DEFAULT_LOOKBACK_DAYS):
     )
     SELECT
         (SELECT failed_tests FROM active_test_areas) as failed_tests,
-        (SELECT COUNT(DISTINCT logical_test_key) FROM test_window) as total_tests_run,
+        (
+            SELECT COUNT(DISTINCT tw.logical_test_key)
+            FROM test_window tw
+            JOIN current_tests ct USING (test_unique_id)
+        ) as total_tests_run,
         (SELECT failed_models FROM active_models) as failed_models,
         (SELECT COUNT(DISTINCT name) FROM model_window) as total_models_run,
         (SELECT AVG(execution_time) FROM model_latest WHERE rn = 1) as avg_execution_time,
@@ -220,8 +224,8 @@ def get_top_failures(limit: int = 5, days: int = DEFAULT_LOOKBACK_DAYS):
             COALESCE(m.original_path, m.path) as model_path,
             ROW_NUMBER() OVER (PARTITION BY r.test_unique_id ORDER BY r.detected_at DESC) as rn
         FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
-        LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
-        LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON r.table_name = m.name
+        JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
+        LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON t.parent_model_unique_id = m.unique_id
         WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
     ),
     model_latest AS (
@@ -238,7 +242,7 @@ def get_top_failures(limit: int = 5, days: int = DEFAULT_LOOKBACK_DAYS):
             COALESCE(m.original_path, m.path) as model_path,
             ROW_NUMBER() OVER (PARTITION BY r.unique_id ORDER BY r.generated_at DESC) as rn
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
-        LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON r.unique_id = m.unique_id
+        JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON r.unique_id = m.unique_id
         WHERE r.generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
         AND r.resource_type = 'model'
     )
