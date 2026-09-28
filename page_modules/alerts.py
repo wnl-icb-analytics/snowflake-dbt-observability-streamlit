@@ -201,8 +201,9 @@ def _render_historical_alerts(search_filter: str):
         st.metric("Model Failures", failed_models)
 
     if not test_history_df.empty:
+        current_history_df = test_history_df[test_history_df["IS_CURRENT"]]
         latest_status_df = (
-            test_history_df.sort_values("DETECTED_AT")
+            current_history_df.sort_values("DETECTED_AT")
             .groupby("TEST_UNIQUE_ID")
             .tail(1)
         )

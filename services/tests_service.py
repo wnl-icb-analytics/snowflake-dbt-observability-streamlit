@@ -12,7 +12,7 @@ def get_tests_summary(
 ):
     """
     Get test summary with pass rate and flaky detection.
-    Joins with dbt_tests for cleaner display names.
+    Only includes tests in the current manifest.
     """
     search_filter = f"AND LOWER(r.test_unique_id) LIKE LOWER('%{search}%')" if search else ""
 
@@ -52,7 +52,7 @@ def get_tests_summary(
             THEN TRUE ELSE FALSE
         END as is_flaky
     FROM test_stats s
-    LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON s.test_unique_id = t.unique_id
+    JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON s.test_unique_id = t.unique_id
     WHERE s.rn = 1
     ORDER BY (s.pass_count::FLOAT / NULLIF(s.total_runs, 0)) ASC NULLS LAST, s.total_runs DESC
     LIMIT {limit} OFFSET {offset}
@@ -100,8 +100,9 @@ def get_models_without_tests():
     """Get models that have no associated tests."""
     query = f"""
     WITH tested_models AS (
-        SELECT DISTINCT table_name
-        FROM {ELEMENTARY_SCHEMA}.elementary_test_results
+        SELECT DISTINCT parent_model_unique_id
+        FROM {ELEMENTARY_SCHEMA}.dbt_tests
+        WHERE parent_model_unique_id IS NOT NULL
     )
     SELECT
         m.unique_id,
@@ -109,8 +110,8 @@ def get_models_without_tests():
         m.schema_name,
         m.database_name
     FROM {ELEMENTARY_SCHEMA}.dbt_models m
-    LEFT JOIN tested_models t ON LOWER(m.name) = LOWER(t.table_name)
-    WHERE t.table_name IS NULL
+    LEFT JOIN tested_models t ON m.unique_id = t.parent_model_unique_id
+    WHERE t.parent_model_unique_id IS NULL
     ORDER BY m.schema_name, m.name
     """
     return run_query(query)
@@ -145,7 +146,7 @@ def get_flaky_tests(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 20):
         s.fail_count,
         ROUND(s.fail_count::FLOAT / s.total_runs, 3) as failure_rate
     FROM test_stats s
-    LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON s.test_unique_id = t.unique_id
+    JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON s.test_unique_id = t.unique_id
     WHERE s.fail_count::FLOAT / s.total_runs >= {FLAKY_TEST_THRESHOLD}
     ORDER BY failure_rate DESC, s.total_runs DESC
     LIMIT {limit}
@@ -158,16 +159,17 @@ def get_tests_for_model(model_name: str, days: int = DEFAULT_LOOKBACK_DAYS):
     query = f"""
     WITH test_runs AS (
         SELECT
-            test_unique_id,
-            test_name,
-            test_type,
-            schema_name,
-            status,
-            detected_at,
-            ROW_NUMBER() OVER (PARTITION BY test_unique_id ORDER BY detected_at DESC) as rn
-        FROM {ELEMENTARY_SCHEMA}.elementary_test_results
-        WHERE LOWER(table_name) = LOWER('{model_name}')
-        AND detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+            r.test_unique_id,
+            r.test_name,
+            r.test_type,
+            r.schema_name,
+            r.status,
+            r.detected_at,
+            ROW_NUMBER() OVER (PARTITION BY r.test_unique_id ORDER BY r.detected_at DESC) as rn
+        FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
+        JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
+        WHERE LOWER(r.table_name) = LOWER('{model_name}')
+        AND r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
     )
     SELECT
         test_unique_id,
@@ -189,9 +191,10 @@ def get_tests_count(days: int = DEFAULT_LOOKBACK_DAYS, search: str = ""):
     search_filter = f"AND LOWER(test_unique_id) LIKE LOWER('%{search}%')" if search else ""
 
     query = f"""
-    SELECT COUNT(DISTINCT test_unique_id) as total
-    FROM {ELEMENTARY_SCHEMA}.elementary_test_results
-    WHERE detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    SELECT COUNT(DISTINCT r.test_unique_id) as total
+    FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
+    JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
+    WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
     {search_filter}
     """
     return run_query(query)
