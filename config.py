@@ -36,3 +36,13 @@ FEED_LATE_MULTIPLIER = 2  # late = no new rows for more than 2x the typical gap.
 FEED_LATE_MIN_HOURS = 48  # ...and for more than 48h
 FEED_NOT_UPDATING_DAYS = 90  # not updating = past the late threshold and no new rows for 90+ days
 SNAPSHOT_STALE_HOURS = 3  # warn when the hourly snapshot is more than 3h old
+
+# Slowdown: a model's latest successful run (within the selected range) compared
+# with the median of its successful runs in the 30 days before it.
+SLOWDOWN_BASELINE_DAYS = 30  # Prior runs from the 30 days before the latest run
+SLOWDOWN_MIN_PRIOR_RUNS = 5  # Need at least 5 prior runs for a median
+SLOWDOWN_RATIO = 2.0  # Latest at least 2x the median...
+SLOWDOWN_MIN_EXTRA_SECONDS = 60  # ...and at least 60s longer than it
+
+# Run detail: models listed in "Share of run time"
+RUN_SHARE_TOP_N = 25
