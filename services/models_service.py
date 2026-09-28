@@ -18,7 +18,7 @@ def get_models_summary(days: int = DEFAULT_LOOKBACK_DAYS):
             AVG(execution_time) OVER (PARTITION BY unique_id) as avg_execution_time,
             COUNT(*) OVER (PARTITION BY unique_id) as run_count
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results
-        WHERE generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+        WHERE generated_at >= DATEADD(day, -{days}, SYSDATE())
         AND resource_type = 'model'
     ),
     latest_runs AS (
@@ -65,7 +65,7 @@ def get_model_run_history(unique_id: str, days: int = DEFAULT_LOOKBACK_DAYS):
             message
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results
         WHERE unique_id = ?
-        AND generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+        AND generated_at >= DATEADD(day, -{days}, SYSDATE())
     ),
     row_counts AS (
         -- A model published to several databases logs one row per copy;
@@ -98,42 +98,35 @@ def get_model_compiled_code(unique_id: str):
 
 
 def get_model_details(unique_id: str):
-    """Get model metadata."""
+    """Metadata of a model, snapshot or seed (materialization 'snapshot' or
+    'seed' for the latter two)."""
+    columns = "unique_id, name, schema_name, database_name, alias, description, owner, tags, meta, package_name, original_path, path"
     query = f"""
-    SELECT
-        unique_id,
-        name,
-        schema_name,
-        database_name,
-        alias,
-        description,
-        owner,
-        tags,
-        package_name,
-        original_path,
-        path,
-        materialization
-    FROM {ELEMENTARY_SCHEMA}.dbt_models
-    WHERE unique_id = ?
+    SELECT {columns}, materialization FROM {ELEMENTARY_SCHEMA}.dbt_models WHERE unique_id = ?
+    UNION ALL
+    SELECT {columns}, 'snapshot' FROM {ELEMENTARY_SCHEMA}.dbt_snapshots WHERE unique_id = ?
+    UNION ALL
+    SELECT {columns}, 'seed' FROM {ELEMENTARY_SCHEMA}.dbt_seeds WHERE unique_id = ?
     """
-    return run_query(query, (unique_id,))
+    return run_query(query, (unique_id,) * 3)
 
 
 def get_model_execution_trend(unique_id: str, days: int = DEFAULT_LOOKBACK_DAYS):
     """Get execution time trend for charting. Excludes skipped/error runs with 0 or null times."""
     query = f"""
     SELECT
-        DATE_TRUNC('day', TRY_TO_TIMESTAMP(generated_at)) as run_date,
+        -- generated_at is UTC; bucket by London day.
+        DATE_TRUNC('day', CONVERT_TIMEZONE('UTC', 'Europe/London', TRY_TO_TIMESTAMP_NTZ(generated_at))) as run_date,
         AVG(execution_time) as avg_time,
         MAX(execution_time) as max_time,
         MIN(execution_time) as min_time,
         COUNT(*) as run_count
     FROM {ELEMENTARY_SCHEMA}.dbt_run_results
     WHERE unique_id = ?
-    AND TRY_TO_TIMESTAMP(generated_at) >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    AND TRY_TO_TIMESTAMP(generated_at) >= DATEADD(day, -{days}, SYSDATE())
     AND execution_time > 0
     AND status = 'success'
-    GROUP BY DATE_TRUNC('day', TRY_TO_TIMESTAMP(generated_at))
+    GROUP BY run_date
     ORDER BY run_date
     """
     return run_query(query, (unique_id,))
@@ -160,7 +153,7 @@ def get_model_row_count_history(model_name: str, days: int = DEFAULT_LOOKBACK_DA
         recorded_at
     FROM {ELEMENTARY_SCHEMA}.ROW_COUNT_LOG
     WHERE LOWER(model_name) = LOWER(?)
-    AND run_started_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    AND run_started_at >= DATEADD(day, -{days}, SYSDATE())
     QUALIFY ROW_NUMBER() OVER (PARTITION BY invocation_id ORDER BY recorded_at DESC) = 1
     ORDER BY run_started_at DESC
     """
@@ -214,7 +207,7 @@ def get_growth_summary(days: int = DEFAULT_LOOKBACK_DAYS):
             row_count,
             run_started_at
         FROM {ELEMENTARY_SCHEMA}.ROW_COUNT_LOG
-        WHERE run_started_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+        WHERE run_started_at >= DATEADD(day, -{days}, SYSDATE())
     ),
     daily AS (
         SELECT model_key, DATE_TRUNC('day', run_started_at) as day, row_count
