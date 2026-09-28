@@ -23,7 +23,7 @@ def get_runtime_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         AVG(execution_time) as avg_execution_time,
         COUNT(DISTINCT unique_id) as models_run
     FROM {ELEMENTARY_SCHEMA}.dbt_run_results
-    WHERE generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    WHERE generated_at >= DATEADD(day, -{days}, SYSDATE())
     AND status = 'success'
     AND resource_type = 'model'
     """
@@ -39,9 +39,9 @@ def get_model_runtimes(days: int = DEFAULT_LOOKBACK_DAYS):
             unique_id,
             name,
             execution_time,
-            DATE_TRUNC('day', TRY_TO_TIMESTAMP(generated_at)) as run_date
+            DATE_TRUNC('day', CONVERT_TIMEZONE('UTC', 'Europe/London', TRY_TO_TIMESTAMP_NTZ(generated_at))) as run_date
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results
-        WHERE generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+        WHERE generated_at >= DATEADD(day, -{days}, SYSDATE())
         AND status = 'success'
         AND resource_type = 'model'
     ),
@@ -107,11 +107,11 @@ def get_slowdowns(days: int = DEFAULT_LOOKBACK_DAYS):
         JOIN {ELEMENTARY_SCHEMA}.dbt_invocations i ON i.invocation_id = r.invocation_id
         WHERE r.resource_type = 'model'
         AND r.status = 'success'
-        AND r.generated_at >= DATEADD(day, -{days + SLOWDOWN_BASELINE_DAYS}, CURRENT_TIMESTAMP())
+        AND r.generated_at >= DATEADD(day, -{days + SLOWDOWN_BASELINE_DAYS}, SYSDATE())
     ),
     latest AS (
         SELECT * FROM runs
-        WHERE rn = 1 AND ran_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+        WHERE rn = 1 AND ran_at >= DATEADD(day, -{days}, SYSDATE())
     ),
     baseline AS (
         SELECT r.unique_id, MEDIAN(r.execution_time) as median_time, COUNT(*) as prior_runs
