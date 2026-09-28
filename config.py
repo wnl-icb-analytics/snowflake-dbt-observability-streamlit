@@ -24,3 +24,15 @@ SLOW_MODEL_PERCENTILE = 90  # Top 10% by execution time = slow
 SLOW_MODEL_MIN_SECONDS = 60  # Minimum 60s to be considered slow
 GROWTH_HIGH_PCT = 50  # Row count up more than 50% over the range = high growth
 GROWTH_SHRINK_PCT = -20  # Row count down more than 20% over the range = shrinking
+
+# Source freshness (Sources page, upstream sources on model detail)
+SOURCE_FRESHNESS_TABLE = "DATA_LAKE.META.SOURCE_FRESHNESS"  # hourly snapshot of source objects
+ROW_COUNT_HISTORY_TABLE = "DATA_LAKE.META.ROW_COUNT_HISTORY"  # one row per object row-count change
+CONTENT_FRESHNESS_TABLE = "REPORTING.DATA_QUALITY.SOURCE_CONTENT_FRESHNESS"  # data complete up to, per feed
+SOURCE_TIMEZONE = "Europe/London"  # display zone for source timestamps
+FEED_UPDATE_WINDOW_HOURS = 2  # row-count changes less than 2h apart count as one update
+FEED_CADENCE_DAYS = 180  # typical gap = median gap between updates in the last 180 days
+FEED_LATE_MULTIPLIER = 2  # late = no new rows for more than 2x the typical gap...
+FEED_LATE_MIN_HOURS = 48  # ...and for more than 48h
+FEED_NOT_UPDATING_DAYS = 90  # not updating = past the late threshold and no new rows for 90+ days
+SNAPSHOT_STALE_HOURS = 3  # warn when the hourly snapshot is more than 3h old

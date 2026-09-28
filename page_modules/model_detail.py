@@ -123,6 +123,11 @@ def render(unique_id: str):
         with st.expander("Compiled SQL (latest run)"):
             st.code(compiled.iloc[0]["COMPILED_CODE"], language="sql")
 
+    # Imported here so this section stays self-contained.
+    from page_modules.sources import render_upstream_sources
+
+    render_upstream_sources(unique_id)
+
 
 def _render_tests(unique_id: str, days: int):
     st.subheader("Tests")
