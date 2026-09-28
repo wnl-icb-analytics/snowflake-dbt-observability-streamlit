@@ -207,59 +207,6 @@ def get_recent_runs(limit: int = 10):
     return run_query(query)
 
 
-def get_top_failures(limit: int = 5, days: int = DEFAULT_LOOKBACK_DAYS):
-    """Get current failures (latest run is failing) for 'needs attention' section."""
-    query = f"""
-    WITH test_latest AS (
-        SELECT
-            r.test_unique_id as unique_id,
-            COALESCE(t.short_name, r.test_name) as name,
-            'test' as type,
-            r.detected_at as failed_at,
-            r.status,
-            r.schema_name,
-            COALESCE(t.test_namespace, r.test_type) as test_namespace,
-            r.table_name as model_name,
-            m.unique_id as tested_model_id,
-            COALESCE(m.original_path, m.path) as model_path,
-            ROW_NUMBER() OVER (PARTITION BY r.test_unique_id ORDER BY r.detected_at DESC) as rn
-        FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
-        JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
-        LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON t.parent_model_unique_id = m.unique_id
-        WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-    ),
-    model_latest AS (
-        SELECT
-            r.unique_id,
-            r.name,
-            'model' as type,
-            r.generated_at as failed_at,
-            r.status,
-            m.schema_name,
-            NULL as test_namespace,
-            NULL as model_name,
-            r.unique_id as tested_model_id,
-            COALESCE(m.original_path, m.path) as model_path,
-            ROW_NUMBER() OVER (PARTITION BY r.unique_id ORDER BY r.generated_at DESC) as rn
-        FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
-        JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON r.unique_id = m.unique_id
-        WHERE r.generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-        AND r.resource_type = 'model'
-    )
-    SELECT unique_id, name, type, failed_at, schema_name, test_namespace, model_name, tested_model_id, model_path
-    FROM (
-        SELECT unique_id, name, type, failed_at, schema_name, test_namespace, model_name, tested_model_id, model_path
-        FROM test_latest WHERE rn = 1 AND status IN ('fail', 'error')
-        UNION ALL
-        SELECT unique_id, name, type, failed_at, schema_name, test_namespace, model_name, tested_model_id, model_path
-        FROM model_latest WHERE rn = 1 AND status IN ('fail', 'error')
-    )
-    ORDER BY failed_at DESC
-    LIMIT {limit}
-    """
-    return run_query(query)
-
-
 def get_project_totals():
     """Get total counts of models and tests in the project (not just recent runs)."""
     query = f"""

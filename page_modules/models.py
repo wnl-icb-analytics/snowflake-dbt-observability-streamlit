@@ -1,218 +1,106 @@
-"""Models page - Searchable list of models with click-through to detail."""
+"""Models page - all models with status and runtime, plus slow models."""
 
+import pandas as pd
 import streamlit as st
-from services.models_service import get_models_summary, get_models_count, get_model_paths
-from config import DEFAULT_LOOKBACK_DAYS, MODELS_PAGE_SIZE
+
+from components import nav, ui
+from components.formatting import status_label, to_datetime
+from config import SLOW_MODEL_MIN_SECONDS
+from services.models_service import get_models_summary
 
 
-def _truncate(text: str, max_len: int = 50) -> str:
-    """Truncate text with ellipsis."""
-    if not text:
-        return ""
-    return text[:max_len] + "..." if len(text) > max_len else text
-
-
-def _build_folder_tree(paths):
-    """Build folder tree from paths."""
-    tree = {}
+def _folders(paths) -> list[str]:
+    """Every folder (and parent folder) in the model paths, sorted."""
+    folders = set()
     for path in paths:
         if not path:
             continue
-        parts = path.replace("\\", "/").split("/")
-        current = tree
-        for part in parts[:-1]:  # Exclude filename
-            if part not in current:
-                current[part] = {}
-            current = current[part]
-    return tree
+        parts = str(path).replace("\\", "/").split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            folders.add("/".join(parts[:i]))
+    return sorted(folders)
 
 
-def _get_folder_options(tree, prefix=""):
-    """Get flat list of folder paths from tree."""
-    options = []
-    for name, subtree in sorted(tree.items()):
-        path = f"{prefix}/{name}" if prefix else name
-        options.append(path)
-        options.extend(_get_folder_options(subtree, path))
-    return options
+def render():
+    days = nav.days()
+    ui.page_header("Models", f"Every model in the project with its latest status and runtime over the last {days} days.")
 
+    df = get_models_summary(days=days)
+    if df.empty:
+        ui.empty_state("No models found")
+        return
 
-def render(search_filter: str = ""):
-    st.title("Models")
+    df = to_datetime(df.copy(), "LAST_RUN")
+    df["MODEL_PATH"] = df["MODEL_PATH"].fillna("").str.replace("\\", "/", regex=False)
+    df["STATUS_LABEL"] = df["LATEST_STATUS"].map(status_label)
 
-    # Get total model count
-    total_count_df = get_models_count()
-    total_models = int(total_count_df.iloc[0]["TOTAL"]) if not total_count_df.empty else 0
+    col_search, col_folder = st.columns([3, 2])
+    with col_search:
+        search = st.text_input("Search", placeholder="Model name or path", key="models_search")
+    with col_folder:
+        folder = st.selectbox("Folder", ["All folders"] + _folders(df["MODEL_PATH"]), key="models_folder")
 
-    # View mode tabs - Browse by Path is default
-    tab_browse, tab_slow = st.tabs(["Browse by Path", "🐢 Slow Models"])
+    filtered = ui.contains(df, ["NAME", "MODEL_PATH", "UNIQUE_ID"], search)
+    if folder != "All folders":
+        filtered = filtered[filtered["MODEL_PATH"].str.startswith(folder + "/")]
 
-    with tab_browse:
-        _render_path_browser(total_models)
-
+    tab_all, tab_slow = st.tabs(["All models", "Slow models"])
+    with tab_all:
+        _render_all(filtered, bool(search) or folder != "All folders")
     with tab_slow:
-        _render_slow_models(search_filter, total_models)
+        _render_slow(filtered)
 
 
-def _render_slow_models(search_filter: str, total_models: int):
-    """Render slow models view - models in top 10% by execution time."""
-    # Filters row
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        days = st.selectbox("Time range", [7, 14, 30], index=0, format_func=lambda x: f"{x}d", key="models_days")
-    with col2:
-        search = search_filter or st.text_input("Filter by name", placeholder="Search models...", key="models_search")
-
-    # Get all models, then filter to slow ones
-    df = get_models_summary(days=days, search=search, show_all=True, limit=2000)
-
+def _render_all(df: pd.DataFrame, filtered: bool):
     if df.empty:
-        st.info("No models found")
+        ui.empty_state("No models match the filters" if filtered else "No models found")
         return
+    selected = ui.table(
+        df,
+        key="models_table",
+        height=600,
+        noun="models",
+        columns={
+            "STATUS_LABEL": "Status",
+            "NAME": "Model",
+            "SCHEMA_NAME": "Schema",
+            "MATERIALIZATION": "Materialization",
+            "AVG_EXECUTION_TIME": ui.seconds_column("Avg time"),
+            "RUN_COUNT": st.column_config.NumberColumn("Runs"),
+            "LAST_RUN": ui.datetime_column("Last run"),
+            "IS_SLOW": st.column_config.CheckboxColumn("Slow"),
+            "MODEL_PATH": st.column_config.TextColumn("Path", width="large"),
+        },
+    )
+    if selected is not None:
+        nav.open_model(selected["UNIQUE_ID"])
 
-    # Filter to slow models only
-    slow_df = df[df["IS_SLOW"] == True].copy()
 
+def _render_slow(df: pd.DataFrame):
+    st.caption(f"Slow = top 10% by average execution time and at least {SLOW_MODEL_MIN_SECONDS}s.")
+    slow_df = df[df["IS_SLOW"] == True].sort_values("AVG_EXECUTION_TIME", ascending=False)  # noqa: E712
     if slow_df.empty:
-        st.success("No slow models (top 10% by execution time)")
+        ui.empty_state("No slow models", ok=True)
         return
-
-    st.caption("Slow = top 10% by avg execution time, minimum 60s")
-    st.write(f"**{len(slow_df)} slow models** out of {total_models} total")
-
-    st.divider()
-
-    # Sort by execution time descending
-    slow_df = slow_df.sort_values("AVG_EXECUTION_TIME", ascending=False)
-
-    # Model list - clickable rows
-    for _, row in slow_df.iterrows():
-        status = row["LATEST_STATUS"]
-        if status in ("fail", "error"):
-            status_icon = "🔴"
-        elif status == "no_runs":
-            status_icon = "⚪"
-        else:
-            status_icon = "🟢"
-        schema = row["SCHEMA_NAME"] or "unknown"
-        name = _truncate(row["NAME"])
-        avg_time = row["AVG_EXECUTION_TIME"]
-        time_str = f"{avg_time:.1f}s" if avg_time else "N/A"
-
-        with st.container(border=True):
-            cols = st.columns([3, 1, 1, 1])
-            with cols[0]:
-                st.markdown(f"{status_icon} 🐢 **{name}**")
-                st.caption(schema)
-            with cols[1]:
-                st.caption("Status")
-                st.write(status.upper().replace("_", " "))
-            with cols[2]:
-                st.caption("Avg Time")
-                st.write(time_str)
-            with cols[3]:
-                if st.button("View", key=f"slow_model_{row['UNIQUE_ID']}"):
-                    st.session_state["selected_model"] = row["UNIQUE_ID"]
-                    st.session_state["selected_test"] = None
-                    st.rerun()
-
-
-def _render_path_browser(total_models: int):
-    """Render path-based folder browser with pagination."""
-    # Get all paths
-    paths_df = get_model_paths()
-    if paths_df.empty:
-        st.info("No model paths found")
-        return
-
-    paths = paths_df["MODEL_PATH"].tolist()
-    tree = _build_folder_tree(paths)
-    folder_options = ["All"] + _get_folder_options(tree)
-
-    # Search and filters row
-    col1, col2, col3 = st.columns([2, 2, 1])
-    with col1:
-        search_text = st.text_input("Search models", placeholder="Filter by name or path...", key="models_browse_search")
-    with col2:
-        selected_folder = st.selectbox(
-            "Folder",
-            folder_options,
-            key="model_folder_select"
-        )
-    with col3:
-        days = st.selectbox("Range", [7, 14, 30], index=0, format_func=lambda x: f"{x}d", key="models_browse_days")
-
-    # Combine search: text search takes priority, folder filters additionally
-    if search_text:
-        search = search_text
-    elif selected_folder != "All":
-        search = selected_folder
-    else:
-        search = ""
-
-    # Pagination
-    page_size = MODELS_PAGE_SIZE
-    total_pages = max(1, (total_models + page_size - 1) // page_size)
-
-    if "models_page" not in st.session_state:
-        st.session_state["models_page"] = 0
-
-    current_page = st.session_state["models_page"]
-    if current_page >= total_pages:
-        current_page = 0
-        st.session_state["models_page"] = 0
-
-    offset = current_page * page_size
-    df = get_models_summary(days=days, search=search, show_all=True, limit=page_size, offset=offset)
-
-    if df.empty:
-        if search:
-            st.info(f"No models found matching '{search}'")
-        else:
-            st.info("No models found")
-        return
-
-    # Header with pagination
-    header_cols = st.columns([3, 2])
-    with header_cols[0]:
-        st.write(f"**{total_models} models**")
-    with header_cols[1]:
-        if total_pages > 1:
-            nav_cols = st.columns([1, 2, 1])
-            with nav_cols[0]:
-                if st.button("← Prev", disabled=current_page == 0, key="models_prev"):
-                    st.session_state["models_page"] = current_page - 1
-                    st.rerun()
-            with nav_cols[1]:
-                st.caption(f"Page {current_page + 1} of {total_pages}")
-            with nav_cols[2]:
-                if st.button("Next →", disabled=current_page >= total_pages - 1, key="models_next"):
-                    st.session_state["models_page"] = current_page + 1
-                    st.rerun()
-
-    # Model list
-    for _, row in df.iterrows():
-        status = row["LATEST_STATUS"]
-        if status in ("fail", "error"):
-            status_icon = "🔴"
-        elif status == "no_runs":
-            status_icon = "⚪"
-        else:
-            status_icon = "🟢"
-        slow_badge = " 🐢" if row["IS_SLOW"] else ""
-        name = row["NAME"]
-        avg_time = row["AVG_EXECUTION_TIME"]
-        time_str = f"{avg_time:.1f}s" if avg_time else ""
-
-        with st.container(border=True):
-            cols = st.columns([4, 1, 1])
-            with cols[0]:
-                st.markdown(f"{status_icon}{slow_badge} **{name}**")
-            with cols[1]:
-                if time_str:
-                    st.caption(time_str)
-            with cols[2]:
-                if st.button("View", key=f"browse_model_{row['UNIQUE_ID']}"):
-                    st.session_state["selected_model"] = row["UNIQUE_ID"]
-                    st.session_state["selected_test"] = None
-                    st.rerun()
+    selected = ui.table(
+        slow_df,
+        key="slow_models_table",
+        height=600,
+        noun="slow models",
+        columns={
+            "STATUS_LABEL": "Status",
+            "NAME": "Model",
+            "SCHEMA_NAME": "Schema",
+            "AVG_EXECUTION_TIME": st.column_config.ProgressColumn(
+                "Avg time",
+                format="%.0f s",
+                min_value=0,
+                max_value=float(slow_df["AVG_EXECUTION_TIME"].max()),
+            ),
+            "RUN_COUNT": st.column_config.NumberColumn("Runs"),
+            "LAST_RUN": ui.datetime_column("Last run"),
+            "MODEL_PATH": st.column_config.TextColumn("Path", width="large"),
+        },
+    )
+    if selected is not None:
+        nav.open_model(selected["UNIQUE_ID"])

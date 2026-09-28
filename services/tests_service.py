@@ -1,21 +1,14 @@
 """Test result queries."""
 
 from database import run_query
-from config import ELEMENTARY_SCHEMA, DEFAULT_LOOKBACK_DAYS, DEFAULT_PAGE_SIZE, FLAKY_TEST_THRESHOLD
+from config import ELEMENTARY_SCHEMA, DEFAULT_LOOKBACK_DAYS, FLAKY_TEST_THRESHOLD
 
 
-def get_tests_summary(
-    days: int = DEFAULT_LOOKBACK_DAYS,
-    search: str = "",
-    limit: int = DEFAULT_PAGE_SIZE,
-    offset: int = 0,
-):
+def get_tests_summary(days: int = DEFAULT_LOOKBACK_DAYS):
     """
     Get test summary with pass rate and flaky detection.
     Only includes tests in the current manifest.
     """
-    search_filter = f"AND LOWER(r.test_unique_id) LIKE LOWER('%{search}%')" if search else ""
-
     query = f"""
     WITH test_stats AS (
         SELECT
@@ -31,7 +24,6 @@ def get_tests_summary(
             SUM(CASE WHEN r.status = 'pass' THEN 1 ELSE 0 END) OVER (PARTITION BY r.test_unique_id) as pass_count
         FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
         WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-        {search_filter}
     )
     SELECT
         s.test_unique_id,
@@ -55,7 +47,6 @@ def get_tests_summary(
     JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON s.test_unique_id = t.unique_id
     WHERE s.rn = 1
     ORDER BY (s.pass_count::FLOAT / NULLIF(s.total_runs, 0)) ASC NULLS LAST, s.total_runs DESC
-    LIMIT {limit} OFFSET {offset}
     """
     return run_query(query)
 
@@ -66,34 +57,18 @@ def get_test_run_history(test_unique_id: str, days: int = DEFAULT_LOOKBACK_DAYS)
     SELECT
         test_unique_id,
         test_name,
+        invocation_id,
         status,
+        failures,
         detected_at,
         test_results_description,
         test_results_query
     FROM {ELEMENTARY_SCHEMA}.elementary_test_results
-    WHERE test_unique_id = '{test_unique_id}'
+    WHERE test_unique_id = ?
     AND detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
     ORDER BY detected_at DESC
     """
-    return run_query(query)
-
-
-def get_test_run_history_ascending(test_unique_id: str, days: int = DEFAULT_LOOKBACK_DAYS):
-    """Get run history for a specific test in chronological order."""
-    query = f"""
-    SELECT
-        test_unique_id,
-        test_name,
-        status,
-        detected_at,
-        test_results_description,
-        test_results_query
-    FROM {ELEMENTARY_SCHEMA}.elementary_test_results
-    WHERE test_unique_id = '{test_unique_id}'
-    AND detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-    ORDER BY detected_at ASC
-    """
-    return run_query(query)
+    return run_query(query, (test_unique_id,))
 
 
 def get_models_without_tests():
@@ -108,7 +83,8 @@ def get_models_without_tests():
         m.unique_id,
         m.name,
         m.schema_name,
-        m.database_name
+        m.database_name,
+        COALESCE(m.original_path, m.path) as model_path
     FROM {ELEMENTARY_SCHEMA}.dbt_models m
     LEFT JOIN tested_models t ON m.unique_id = t.parent_model_unique_id
     WHERE t.parent_model_unique_id IS NULL
@@ -117,7 +93,7 @@ def get_models_without_tests():
     return run_query(query)
 
 
-def get_flaky_tests(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 20):
+def get_flaky_tests(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 200):
     """Get tests with high failure rates (flaky tests)."""
     query = f"""
     WITH test_stats AS (
@@ -154,50 +130,42 @@ def get_flaky_tests(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 20):
     return run_query(query)
 
 
-def get_tests_for_model(model_name: str, days: int = DEFAULT_LOOKBACK_DAYS):
-    """Get tests associated with a specific model with latest status."""
+def get_tests_for_model(unique_id: str, days: int = DEFAULT_LOOKBACK_DAYS):
+    """Tests defined on a model (dbt_tests.parent_model_unique_id) with their
+    latest status in the range; tests without runs in the range are included."""
     query = f"""
-    WITH test_runs AS (
+    WITH model_tests AS (
         SELECT
-            r.test_unique_id,
-            r.test_name,
-            r.test_type,
-            r.schema_name,
-            r.status,
-            r.detected_at,
-            ROW_NUMBER() OVER (PARTITION BY r.test_unique_id ORDER BY r.detected_at DESC) as rn
+            unique_id as test_unique_id,
+            COALESCE(short_name, name) as test_name,
+            COALESCE(test_namespace, type) as test_namespace,
+            test_column_name,
+            severity
+        FROM {ELEMENTARY_SCHEMA}.dbt_tests
+        WHERE parent_model_unique_id = ?
+    ),
+    latest AS (
+        SELECT r.test_unique_id, r.status, r.detected_at
         FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
-        JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
-        WHERE LOWER(r.table_name) = LOWER('{model_name}')
-        AND r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+        JOIN model_tests t ON r.test_unique_id = t.test_unique_id
+        WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY r.test_unique_id ORDER BY r.detected_at DESC) = 1
     )
     SELECT
-        test_unique_id,
-        test_name,
-        test_type,
-        schema_name,
-        status as latest_status
-    FROM test_runs
-    WHERE rn = 1
+        t.test_unique_id,
+        t.test_name,
+        t.test_namespace,
+        t.test_column_name,
+        t.severity,
+        l.status as latest_status,
+        l.detected_at as last_run
+    FROM model_tests t
+    LEFT JOIN latest l ON l.test_unique_id = t.test_unique_id
     ORDER BY
-        CASE WHEN status IN ('fail', 'error') THEN 0 ELSE 1 END,
-        test_name
+        CASE WHEN l.status IN ('fail', 'error') THEN 0 WHEN l.status = 'warn' THEN 1 ELSE 2 END,
+        t.test_name
     """
-    return run_query(query)
-
-
-def get_tests_count(days: int = DEFAULT_LOOKBACK_DAYS, search: str = ""):
-    """Get total count of tests with runs in the time period."""
-    search_filter = f"AND LOWER(test_unique_id) LIKE LOWER('%{search}%')" if search else ""
-
-    query = f"""
-    SELECT COUNT(DISTINCT r.test_unique_id) as total
-    FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
-    JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
-    WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-    {search_filter}
-    """
-    return run_query(query)
+    return run_query(query, (unique_id,))
 
 
 def get_test_details(test_unique_id: str):
@@ -222,8 +190,8 @@ def get_test_details(test_unique_id: str):
         t.original_path
     FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
-    WHERE r.test_unique_id = '{test_unique_id}'
+    WHERE r.test_unique_id = ?
     ORDER BY r.detected_at DESC
     LIMIT 1
     """
-    return run_query(query)
+    return run_query(query, (test_unique_id,))

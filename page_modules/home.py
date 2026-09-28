@@ -1,28 +1,32 @@
 """Home page - Overview dashboard with KPIs."""
 
-import os
 import pandas as pd
 import streamlit as st
-from services.metrics_service import get_dashboard_kpis, get_recent_runs, get_project_totals, get_total_execution_time
+
+from components import nav, ui
+from components.formatting import (
+    format_duration,
+    format_relative_time,
+    format_timestamp,
+    issue_status,
+    truncate,
+)
+from components.issue_cards import render_model_error_card, render_test_issue_card
+from page_modules.runs import runs_table
 from services.alerts_service import (
     get_current_issue_summary,
-    get_latest_run_issues,
-    get_latest_build_summary,
-    get_downstream_skips,
     get_downstream_model_counts,
+    get_downstream_skips,
+    get_latest_build_summary,
     get_latest_build_test_results,
+    get_latest_run_issues,
 )
-from components.issue_cards import (
-    format_timestamp as _format_timestamp,
-    format_relative_time as _format_relative_time,
-    truncate as _truncate,
-    format_duration as _format_duration,
-    format_issue_status as _format_issue_status,
-    render_model_error_card as _render_model_error_card,
-    render_test_issue_card as _render_test_issue_card,
+from services.metrics_service import (
+    get_dashboard_kpis,
+    get_project_totals,
+    get_recent_runs,
+    get_total_execution_time,
 )
-
-DBT_LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "dbt-logo.svg")
 
 
 def _summarize_issue(row) -> str:
@@ -41,7 +45,7 @@ def _summarize_issue(row) -> str:
         if "out of sync" in message.lower() or "on_schema_change" in message.lower():
             return "Incremental schema drift between source and target."
         if message:
-            return _truncate(message, 70)
+            return truncate(message, 70)
         return f"{failure_count} model failures in range."
 
     checks_text = f"{int(affected_checks)} checks affected" if pd.notna(affected_checks) else "Test failures present"
@@ -52,14 +56,14 @@ def _render_current_issues(days: int):
     """Current failures across all runs - the true health picture."""
     issues_df = get_current_issue_summary(days)
 
-    st.subheader("Open or recurring issues")
+    st.subheader("Open issues")
     st.caption(
-        f"Everything currently failing across all runs in the last {days}d — the true health "
-        "picture, regardless of what the latest run happened to cover."
+        f"Everything currently failing across all runs in the last {days} days, "
+        "regardless of what the latest run covered."
     )
 
     if issues_df.empty:
-        st.success("No open or recurring issues")
+        ui.empty_state("No open or recurring issues", ok=True)
         return
 
     model_df = issues_df[issues_df["ISSUE_TYPE"] == "Model"]
@@ -78,12 +82,12 @@ def _render_current_issues(days: int):
             uid = str(uid) if pd.notna(uid) else None
             fails = int(row["FAILURE_COUNT"] or 0)
             meta = (
-                f"{_format_issue_status(row['CURRENT_STATUS'])} · "
+                f"{issue_status(row['CURRENT_STATUS'])} · "
                 f"{fails} failures in {days}d · "
-                f"streak since {_format_relative_time(row['FIRST_ISSUE_AT'])} · "
-                f"last {_format_relative_time(row['LAST_ISSUE_AT'])}"
+                f"streak since {format_relative_time(row['FIRST_ISSUE_AT'])} · "
+                f"last {format_relative_time(row['LAST_ISSUE_AT'])}"
             )
-            _render_model_error_card(
+            render_model_error_card(
                 object_name=row["OBJECT_NAME"],
                 message=row.get("SAMPLE_MESSAGE"),
                 unique_id=uid,
@@ -95,31 +99,27 @@ def _render_current_issues(days: int):
     if not test_df.empty:
         st.markdown("**Test areas**")
         display_df = test_df.copy()
-        display_df["STATUS_LABEL"] = display_df["CURRENT_STATUS"].map(_format_issue_status)
+        display_df["STATUS_LABEL"] = display_df["CURRENT_STATUS"].map(issue_status)
         display_df["SUMMARY"] = display_df.apply(_summarize_issue, axis=1)
-        display_df["FIRST_SEEN"] = display_df["FIRST_ISSUE_AT"].map(_format_relative_time)
-        display_df["LAST_SEEN"] = display_df["LAST_ISSUE_AT"].map(_format_relative_time)
-
-        display_df = display_df.rename(
-            columns={
-                "OBJECT_NAME": "Object",
-                "ISSUE_TYPE": "Type",
-                "STATUS_LABEL": "Status",
-                "FAILURE_COUNT": f"Failures ({days}d)",
-                "FIRST_SEEN": "Streak Started",
-                "LAST_SEEN": "Last Seen",
-                "SUMMARY": "Summary",
-            }
-        )
-
+        display_df["FIRST_SEEN"] = display_df["FIRST_ISSUE_AT"].map(format_relative_time)
+        display_df["LAST_SEEN"] = display_df["LAST_ISSUE_AT"].map(format_relative_time)
         st.dataframe(
-            display_df[["Object", "Type", "Status", f"Failures ({days}d)", "Streak Started", "Last Seen", "Summary"]],
-            use_container_width=True,
+            display_df,
+            column_order=["OBJECT_NAME", "STATUS_LABEL", "FAILURE_COUNT", "FIRST_SEEN", "LAST_SEEN", "SUMMARY"],
+            column_config={
+                "OBJECT_NAME": "Object",
+                "STATUS_LABEL": "Status",
+                "FAILURE_COUNT": st.column_config.NumberColumn(f"Failures ({days}d)"),
+                "FIRST_SEEN": "Streak started",
+                "LAST_SEEN": "Last seen",
+                "SUMMARY": st.column_config.TextColumn("Summary", width="large"),
+            },
             hide_index=True,
+            width="stretch",
         )
 
 
-def _render_latest_run_issues():
+def _render_latest_build():
     """Issues from the most recent build invocation (may be a partial run)."""
     summary = get_latest_build_summary()
     latest_df = get_latest_run_issues()
@@ -134,27 +134,23 @@ def _render_latest_run_issues():
         invocation_id = s["INVOCATION_ID"]
         test_failed = int(s.get("TEST_FAILED_COUNT") or 0)
         test_warned = int(s.get("TEST_WARNED_COUNT") or 0)
-        caption = (
-            f"Most recent build · Models 🟢 {int(s['SUCCESS_COUNT'] or 0)} "
-            f"🔴 {int(s['FAILED_COUNT'] or 0)} ⚪ {skipped_count}"
-        )
+        parts = [
+            f"{format_timestamp(s['CREATED_AT'])} ({format_relative_time(s['CREATED_AT'])})",
+            f"models: {int(s['SUCCESS_COUNT'] or 0)} ok, {int(s['FAILED_COUNT'] or 0)} failed, {skipped_count} skipped",
+        ]
         if test_failed or test_warned:
-            test_bits = []
-            if test_failed:
-                test_bits.append(f"🔴 {test_failed}")
-            if test_warned:
-                test_bits.append(f"🟡 {test_warned}")
-            caption += " · Tests " + " ".join(test_bits)
-        caption += f" · {_format_relative_time(s['CREATED_AT'])}"
-        st.caption(caption)
+            parts.append(f"tests: {test_failed} failed, {test_warned} warned")
+        st.caption(" · ".join(parts))
         sel = s.get("SELECTED")
         if sel is not None and str(sel).strip() and str(sel).lower() != "none":
-            st.caption(f"Partial run — selection: `{_truncate(str(sel), 80)}`. Project-wide health is above.")
+            st.caption(f"Partial run, selection: `{truncate(str(sel), 80)}`. Project-wide health is above.")
+        if st.button("Open this run", key="latest_build_open", icon=":material/open_in_new:"):
+            nav.open_run(invocation_id)
     else:
         st.caption("The most recent dbt build invocation.")
 
     if latest_df.empty:
-        st.success("Latest build completed without failures or warnings")
+        ui.empty_state("Latest build completed without failures or warnings", ok=True)
         return
 
     # Blast radius: only walk the DAG when the build actually skipped models.
@@ -164,14 +160,13 @@ def _render_latest_run_issues():
         skips_map = {r["UNIQUE_ID"]: int(r["DOWNSTREAM_SKIPPED"]) for _, r in ds.iterrows()}
 
     model_df = latest_df[latest_df["ISSUE_TYPE"] == "Model"]
-
     if not model_df.empty:
         st.markdown("**Model failures**")
         for _, row in model_df.iterrows():
             uid = row.get("UNIQUE_ID")
             uid = str(uid) if pd.notna(uid) else None
-            meta = f"{_format_issue_status(row['CURRENT_STATUS'])} · {_format_timestamp(row['EVENT_AT'])}"
-            _render_model_error_card(
+            meta = f"{issue_status(row['CURRENT_STATUS'])} · {format_timestamp(row['EVENT_AT'])}"
+            render_model_error_card(
                 object_name=row["OBJECT_NAME"],
                 message=row.get("SUMMARY"),
                 unique_id=uid,
@@ -184,149 +179,62 @@ def _render_latest_run_issues():
     if not test_results.empty:
         st.markdown("**Test issues**")
         for _, row in test_results.iterrows():
-            _render_test_issue_card(row, key_prefix="latest_test")
+            render_test_issue_card(row, key_prefix="latest_test")
 
 
 def _render_recent_runs():
-    """Recent invocations with an at-a-glance status light and model/test/skip counts."""
     st.subheader("Recent runs")
     runs = get_recent_runs(limit=8)
     if runs.empty:
-        st.info("No recent runs")
+        ui.empty_state("No recent runs")
         return
-
-    for _, r_row in runs.iterrows():
-        invocation_id = r_row["INVOCATION_ID"]
-        success = int(r_row.get("SUCCESS_COUNT") or 0)
-        fail = int(r_row.get("FAIL_COUNT") or 0)
-        skipped = int(r_row.get("SKIPPED_COUNT") or 0)
-        models_run = int(r_row.get("MODELS_RUN") or 0)
-        duration = r_row.get("DURATION_SECONDS") or 0
-        tests_run = int(r_row.get("TESTS_RUN") or 0)
-        tests_passed = int(r_row.get("TESTS_PASSED") or 0)
-        tests_failed = int(r_row.get("TESTS_FAILED") or 0)
-        tests_warned = int(r_row.get("TESTS_WARNED") or 0)
-
-        # Red if anything failed, yellow if only warnings, white if only skips, else green.
-        if fail > 0 or tests_failed > 0:
-            icon = "🔴"
-        elif tests_warned > 0:
-            icon = "🟡"
-        elif skipped > 0 and success == 0:
-            icon = "⚪"
-        else:
-            icon = "🟢"
-
-        with st.container(border=True):
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                st.markdown(
-                    f"{icon} **{_format_timestamp(r_row['CREATED_AT'])}** · "
-                    f"{_format_relative_time(r_row['CREATED_AT'])}"
-                )
-                cmd = r_row["COMMAND"] or "dbt"
-                target = r_row["TARGET_NAME"] or ""
-                warehouse = r_row.get("WAREHOUSE") or ""
-                st.caption(" | ".join(p for p in [cmd, target, warehouse] if p))
-
-                selected = r_row.get("SELECTED") or ""
-                if selected:
-                    st.caption(_truncate(str(selected), 50))
-
-                if models_run > 0:
-                    parts = [f"Models: 🟢 {success}"]
-                    if fail > 0:
-                        parts.append(f"🔴 {fail}")
-                    if skipped > 0:
-                        parts.append(f"⚪ {skipped}")
-                    line = " ".join(parts)
-                    time_str = _format_duration(duration)
-                    if time_str:
-                        line += f" | {time_str}"
-                    st.caption(line)
-
-                if tests_run > 0:
-                    test_parts = [f"Tests: 🟢 {tests_passed}"]
-                    if tests_failed > 0:
-                        test_parts.append(f"🔴 {tests_failed}")
-                    if tests_warned > 0:
-                        test_parts.append(f"🟡 {tests_warned}")
-                    st.caption(" ".join(test_parts))
-            with col2:
-                if st.button("View", key=f"home_run_{invocation_id}"):
-                    st.session_state["selected_invocation"] = invocation_id
-                    st.rerun()
+    selected = runs_table(runs, key="home_runs")
+    if selected is not None:
+        nav.open_run(selected["INVOCATION_ID"])
 
 
-def render(search_filter: str = ""):
-    # Title with dbt logo and time range selector
-    title_col, range_col = st.columns([4, 1])
-    with title_col:
-        logo_col, text_col = st.columns([0.15, 3])
-        with logo_col:
-            st.image(DBT_LOGO_PATH, width=120)
-        with text_col:
-            st.title("dbt Project Health")
-    with range_col:
-        time_range = st.selectbox(
-            "Time Range",
-            options=[7, 30],
-            format_func=lambda x: f"{x}d",
-            label_visibility="collapsed"
-        )
-
-    kpis = get_dashboard_kpis(days=time_range)
-    if kpis.empty:
-        st.warning("No data available")
-        return
+def render():
+    days = nav.days()
 
     totals = get_project_totals()
     total_models = int(totals.iloc[0]["TOTAL_MODELS"] or 0) if not totals.empty else 0
     total_tests = int(totals.iloc[0]["TOTAL_TESTS"] or 0) if not totals.empty else 0
+    ui.page_header(
+        "Project health",
+        f"{total_models:,} models and {total_tests:,} tests in the project · last {days} days",
+    )
+
+    kpis = get_dashboard_kpis(days=days)
+    if kpis.empty:
+        ui.empty_state("No data available")
+        return
 
     row = kpis.iloc[0]
     failed_tests = int(row["FAILED_TESTS"] or 0)
     failed_models = int(row["FAILED_MODELS"] or 0)
     total_failures = failed_tests + failed_models
 
-    # Static project inventory - a caption, not a KPI.
-    st.caption(f"{total_models} models · {total_tests} tests in project")
-
     # Health banner reflects current open state across ALL runs (latest status
     # per model/test), not a single possibly-partial build.
     if total_failures == 0:
-        st.success("All systems healthy — nothing currently failing")
+        st.success("All systems healthy: nothing currently failing")
     else:
         st.error(
             f"{total_failures} currently failing "
-            f"({failed_models} models, {failed_tests} test areas) — see open issues below"
+            f"({failed_models} models, {failed_tests} test areas). See open issues below."
         )
 
-    st.divider()
-
-    exec_time_df = get_total_execution_time(days=time_range)
+    exec_time_df = get_total_execution_time(days=days)
     total_exec_time = exec_time_df.iloc[0]["TOTAL_TIME"] if not exec_time_df.empty else 0
 
-    # KPI row - 4 actionable metrics (project totals live in the caption above).
-    cols = st.columns(4)
-    with cols[0]:
-        st.metric("Failing models", failed_models)
-    with cols[1]:
-        st.metric("Failing test areas", failed_tests)
-    with cols[2]:
-        st.metric(f"Runtime ({time_range}d)", _format_duration(total_exec_time) or "N/A")
-    with cols[3]:
-        st.metric("Last run", _format_relative_time(row["LAST_RUN_TIME"]))
-
-    st.divider()
+    ui.metric_row([
+        ("Failing models", failed_models),
+        ("Failing test areas", failed_tests),
+        (f"Runtime ({days}d)", format_duration(total_exec_time) or "N/A"),
+        ("Last run", format_relative_time(row["LAST_RUN_TIME"])),
+    ])
 
     # Current health first (what's broken now), then the latest run, then history.
-    _render_current_issues(time_range)
-
-    st.divider()
-
-    _render_latest_run_issues()
-
-    st.divider()
-
+    _render_current_issues(days)
+    _render_latest_build()
     _render_recent_runs()

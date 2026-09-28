@@ -35,29 +35,6 @@ def execution_time_chart(df: pd.DataFrame, height: int = 300) -> alt.Chart:
     return chart
 
 
-def pass_rate_bar_chart(df: pd.DataFrame, height: int = 300) -> alt.Chart:
-    """Bar chart showing pass rates."""
-    if df.empty:
-        return alt.Chart().mark_text().encode(text=alt.value("No data"))
-
-    chart = (
-        alt.Chart(df)
-        .mark_bar()
-        .encode(
-            x=alt.X("TEST_NAME:N", title="Test", sort="-y"),
-            y=alt.Y("PASS_RATE:Q", title="Pass Rate", scale=alt.Scale(domain=[0, 1])),
-            color=alt.condition(
-                alt.datum.PASS_RATE < 0.8,
-                alt.value("#dc3545"),
-                alt.value("#28a745"),
-            ),
-            tooltip=["TEST_NAME:N", "PASS_RATE:Q", "TOTAL_RUNS:Q"],
-        )
-        .properties(height=height)
-    )
-    return chart
-
-
 def run_status_timeline(df: pd.DataFrame, height: int = 100) -> alt.Chart:
     """Mini timeline showing recent run statuses (sparkline-style)."""
     if df.empty:
