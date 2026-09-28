@@ -29,7 +29,7 @@ def compile_show_control(key: str) -> bool:
 
 def runs_table(df: pd.DataFrame, *, key: str, height="auto", noun: str | None = None):
     """Invocations as a selectable table; returns the selected row or None."""
-    df = to_datetime(df.copy(), "CREATED_AT")
+    df = to_datetime(df.copy(), "RUN_STARTED_AT")
     df["STATUS_LABEL"] = df.apply(run_status_label, axis=1)
     df["JOB_LABEL"] = df["JOB_TYPE"].map(job_label)
     df["TRIGGER_LABEL"] = df["TRIGGER_TYPE"].map(trigger_label)
@@ -41,7 +41,7 @@ def runs_table(df: pd.DataFrame, *, key: str, height="auto", noun: str | None = 
         noun=noun,
         columns={
             "STATUS_LABEL": "Status",
-            "CREATED_AT": ui.datetime_column("Started"),
+            "RUN_STARTED_AT": ui.datetime_column("Started"),
             "JOB_LABEL": "Job",
             "TRIGGER_LABEL": "Trigger",
             "COMMAND": "Command",

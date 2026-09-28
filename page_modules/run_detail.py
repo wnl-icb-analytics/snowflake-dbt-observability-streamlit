@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from components import nav, ui
-from components.formatting import format_duration, format_timestamp, is_missing, status_label
+from components.formatting import LOCAL_TZ, format_duration, format_timestamp, is_missing, status_label
 from components.issue_cards import render_model_error_card, render_test_issue_card
 from config import RUN_SHARE_TOP_N
 from page_modules.jobs import job_caption
@@ -30,7 +30,7 @@ def render(invocation_id: str):
         return
 
     details = details_df.iloc[0]
-    ui.page_header(f"Run {format_timestamp(details['CREATED_AT'])}", f"`{invocation_id}`")
+    ui.page_header(f"Run {format_timestamp(details['RUN_STARTED_AT'])}", f"`{invocation_id}`")
 
     meta = [
         details.get("COMMAND") or "dbt",
@@ -248,7 +248,8 @@ def _render_lanes(timed: pd.DataFrame, chain_ids: set, n_models: int, x_max: flo
     data["LANE_MID"] = data["LANE"] + 0.4
     data["START_MIN"] = data["START_SEC"] / 60
     data["END_MIN"] = data["END_SEC"] / 60
-    data["START_LABEL"] = data["START"].dt.strftime("%H:%M:%S")
+    # START is naive UTC; label it in UK time.
+    data["START_LABEL"] = data["START"].dt.tz_localize("UTC").dt.tz_convert(LOCAL_TZ).dt.strftime("%H:%M:%S")
     data["DURATION"] = data["EXECUTION_TIME"].map(_duration_label)
     on_chain = data["UNIQUE_ID"].isin(chain_ids)
     data = data.drop(columns=["UNIQUE_ID", "START", "START_SEC", "END_SEC"])
@@ -261,7 +262,7 @@ def _render_lanes(timed: pd.DataFrame, chain_ids: set, n_models: int, x_max: flo
     )
     x_scale = alt.Scale(domain=[0, x_max], nice=False)
     y_scale = alt.Scale(domain=[0, lanes], reverse=True, nice=False)
-    tooltip = _bar_tooltip("Start (UTC)")
+    tooltip = _bar_tooltip("Start")
     bars = alt.Chart(data).mark_rect().encode(
         x=alt.X("START_MIN:Q", title="Minutes from run start", scale=x_scale),
         x2="END_MIN:Q",

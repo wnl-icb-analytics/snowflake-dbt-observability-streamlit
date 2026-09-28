@@ -23,7 +23,7 @@ def get_tests_summary(days: int = DEFAULT_LOOKBACK_DAYS):
             COUNT(*) OVER (PARTITION BY r.test_unique_id) as total_runs,
             SUM(CASE WHEN r.status = 'pass' THEN 1 ELSE 0 END) OVER (PARTITION BY r.test_unique_id) as pass_count
         FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
-        WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+        WHERE r.detected_at >= DATEADD(day, -{days}, SYSDATE())
     )
     SELECT
         s.test_unique_id,
@@ -65,7 +65,7 @@ def get_test_run_history(test_unique_id: str, days: int = DEFAULT_LOOKBACK_DAYS)
         test_results_query
     FROM {ELEMENTARY_SCHEMA}.elementary_test_results
     WHERE test_unique_id = ?
-    AND detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    AND detected_at >= DATEADD(day, -{days}, SYSDATE())
     ORDER BY detected_at DESC
     """
     return run_query(query, (test_unique_id,))
@@ -106,7 +106,7 @@ def get_flaky_tests(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 200):
             SUM(CASE WHEN r.status = 'pass' THEN 1 ELSE 0 END) as pass_count,
             SUM(CASE WHEN r.status IN ('fail', 'error') THEN 1 ELSE 0 END) as fail_count
         FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
-        WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+        WHERE r.detected_at >= DATEADD(day, -{days}, SYSDATE())
         GROUP BY r.test_unique_id, r.test_name, r.table_name, r.schema_name
         HAVING total_runs >= 3
     )
@@ -148,7 +148,7 @@ def get_tests_for_model(unique_id: str, days: int = DEFAULT_LOOKBACK_DAYS):
         SELECT r.test_unique_id, r.status, r.detected_at
         FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
         JOIN model_tests t ON r.test_unique_id = t.test_unique_id
-        WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+        WHERE r.detected_at >= DATEADD(day, -{days}, SYSDATE())
         QUALIFY ROW_NUMBER() OVER (PARTITION BY r.test_unique_id ORDER BY r.detected_at DESC) = 1
     )
     SELECT

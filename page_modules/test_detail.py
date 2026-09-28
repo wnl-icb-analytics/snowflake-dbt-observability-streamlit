@@ -5,7 +5,7 @@ import streamlit as st
 
 from components import nav, ui
 from components.charts import test_status_history_chart
-from components.formatting import status_label, to_datetime
+from components.formatting import json_list, status_label, to_datetime
 from services.models_service import get_model_by_name
 from services.tests_service import get_test_details, get_test_run_history
 
@@ -22,13 +22,14 @@ def render(test_unique_id: str):
     ui.page_header(details.get("SHORT_NAME") or details["TEST_NAME"], f"`{test_unique_id}`")
 
     column = details.get("TEST_COLUMN_NAME") or details.get("COLUMN_NAME")
+    tags = json_list(details.get("TAGS"))
     meta = [
         test_ns,
         f"model {details['TABLE_NAME']}" if details.get("TABLE_NAME") else "",
         f"column {column}" if column else "",
         f"schema {details['SCHEMA_NAME']}" if details.get("SCHEMA_NAME") else "",
         f"severity {details['SEVERITY']}" if details.get("SEVERITY") else "",
-        f"tags {details['TAGS']}" if details.get("TAGS") and details["TAGS"] != "[]" else "",
+        f"tags {', '.join(tags)}" if tags else "",
     ]
     st.caption(" · ".join(p for p in meta if p))
     if details.get("ORIGINAL_PATH"):
@@ -58,9 +59,9 @@ def render(test_unique_id: str):
     ])
 
     st.subheader("Run history")
-    if total_runs > 1:
-        st.altair_chart(test_status_history_chart(history_df))
     runs = to_datetime(history_df.copy(), "DETECTED_AT")
+    if total_runs > 1:
+        st.altair_chart(test_status_history_chart(runs))
     runs["STATUS_LABEL"] = runs["STATUS"].map(status_label)
     selected = ui.table(
         runs,

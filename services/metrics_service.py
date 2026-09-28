@@ -5,151 +5,11 @@ from config import ELEMENTARY_SCHEMA, DEFAULT_LOOKBACK_DAYS
 from services.jobs_service import hide_compile_show_sql, job_columns_sql
 
 
-def get_dashboard_kpis(days: int = DEFAULT_LOOKBACK_DAYS):
-    """Get main dashboard KPIs in a single query."""
+def get_last_run_time():
+    """Time of the latest model, seed, snapshot or test result (UTC text)."""
     query = f"""
-    WITH model_all AS (
-        SELECT
-            name,
-            status,
-            execution_time,
-            generated_at
-        FROM {ELEMENTARY_SCHEMA}.dbt_run_results
-        WHERE resource_type = 'model'
-    ),
-    model_window AS (
-        SELECT *
-        FROM model_all
-        WHERE generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-    ),
-    -- Only consider models still defined in the project (refreshed from
-    -- the latest manifest by Elementary). Deleted models drop off.
-    current_models AS (
-        SELECT DISTINCT name
-        FROM {ELEMENTARY_SCHEMA}.dbt_models
-    ),
-    model_latest AS (
-        SELECT
-            ma.name,
-            ma.status,
-            ma.execution_time,
-            ROW_NUMBER() OVER (PARTITION BY ma.name ORDER BY ma.generated_at DESC) as rn
-        FROM model_all ma
-        JOIN current_models cm USING (name)
-    ),
-    model_last_success AS (
-        SELECT
-            name,
-            MAX(generated_at) as last_success_at
-        FROM model_all
-        WHERE status = 'success'
-        GROUP BY name
-    ),
-    model_window_agg AS (
-        SELECT
-            name,
-            COUNT_IF(status IN ('fail', 'error')) as failure_count
-        FROM model_window
-        GROUP BY name
-    ),
-    active_models AS (
-        SELECT COUNT(*) as failed_models
-        FROM (
-            SELECT
-                m.name
-            FROM model_all m
-            LEFT JOIN model_last_success s ON m.name = s.name
-            LEFT JOIN model_window_agg w ON m.name = w.name
-            JOIN model_latest l ON m.name = l.name AND l.rn = 1
-            WHERE l.status IN ('fail', 'error')
-            GROUP BY m.name, s.last_success_at, w.failure_count
-            HAVING COALESCE(w.failure_count, 0) > 0
-        )
-    ),
-    test_all AS (
-        SELECT
-            r.table_name,
-            r.test_unique_id,
-            COALESCE(
-                REGEXP_REPLACE(r.test_unique_id, '^test\\.[^.]+\\.', ''),
-                CONCAT(COALESCE(r.table_name, ''), '||', COALESCE(COALESCE(t.short_name, r.test_name), ''))
-            ) as logical_test_key,
-            r.status,
-            r.detected_at
-        FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
-        LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
-        WHERE r.table_name IS NOT NULL
-    ),
-    test_window AS (
-        SELECT *
-        FROM test_all
-        WHERE detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-    ),
-    -- Only consider tests still defined in the project. A logical_test_key
-    -- survives if at least one of its underlying test_unique_ids is still
-    -- in dbt_tests (handles namespace renames across versions).
-    current_tests AS (
-        SELECT DISTINCT unique_id as test_unique_id
-        FROM {ELEMENTARY_SCHEMA}.dbt_tests
-    ),
-    test_all_current AS (
-        SELECT ta.*
-        FROM test_all ta
-        JOIN current_tests ct USING (test_unique_id)
-    ),
-    test_latest AS (
-        SELECT
-            table_name,
-            logical_test_key,
-            status,
-            ROW_NUMBER() OVER (PARTITION BY logical_test_key ORDER BY detected_at DESC) as rn
-        FROM test_all_current
-    ),
-    test_last_pass AS (
-        SELECT
-            logical_test_key,
-            MAX(detected_at) as last_pass_at
-        FROM test_all
-        WHERE status = 'pass'
-        GROUP BY logical_test_key
-    ),
-    test_window_agg AS (
-        SELECT
-            table_name,
-            logical_test_key,
-            COUNT_IF(status IN ('fail', 'error')) as failure_count
-        FROM test_window
-        GROUP BY table_name, logical_test_key
-    ),
-    active_test_areas AS (
-        SELECT COUNT(DISTINCT table_name) as failed_tests
-        FROM (
-            SELECT
-                w.table_name,
-                w.logical_test_key
-            FROM test_window_agg w
-            JOIN test_latest l ON w.logical_test_key = l.logical_test_key AND l.rn = 1
-            LEFT JOIN test_last_pass p ON w.logical_test_key = p.logical_test_key
-            WHERE w.failure_count > 0
-              AND l.status IN ('fail', 'error')
-        )
-    ),
-    last_run AS (
-        SELECT MAX(generated_at) as last_run_time
-        FROM {ELEMENTARY_SCHEMA}.dbt_run_results
-        WHERE generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-    )
-    SELECT
-        (SELECT failed_tests FROM active_test_areas) as failed_tests,
-        (
-            SELECT COUNT(DISTINCT tw.logical_test_key)
-            FROM test_window tw
-            JOIN current_tests ct USING (test_unique_id)
-        ) as total_tests_run,
-        (SELECT failed_models FROM active_models) as failed_models,
-        (SELECT COUNT(DISTINCT name) FROM model_window) as total_models_run,
-        (SELECT AVG(execution_time) FROM model_latest WHERE rn = 1) as avg_execution_time,
-        (SELECT last_run_time FROM last_run) as last_run_time
+    SELECT MAX(generated_at) as last_run_time
+    FROM {ELEMENTARY_SCHEMA}.dbt_run_results
     """
     return run_query(query)
 
@@ -167,7 +27,7 @@ def get_recent_runs(limit: int = 10, include_compile_show: bool = False):
             SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped_count,
             SUM(execution_time) as total_time
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results
-        WHERE resource_type = 'model'
+        WHERE resource_type IN ('model', 'seed', 'snapshot')
         GROUP BY invocation_id
     ),
     test_stats AS (

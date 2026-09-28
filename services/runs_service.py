@@ -17,7 +17,7 @@ def get_invocations(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 1000, includ
             SUM(CASE WHEN status IN ('fail', 'error') THEN 1 ELSE 0 END) as fail_count,
             SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped_count
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results
-        WHERE resource_type = 'model'
+        WHERE resource_type IN ('model', 'seed', 'snapshot')
         GROUP BY invocation_id
     ),
     test_stats AS (
@@ -106,7 +106,7 @@ def get_invocation_models(invocation_id: str):
     FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON r.unique_id = m.unique_id
     WHERE r.invocation_id = ?
-    AND r.resource_type = 'model'
+    AND r.resource_type IN ('model', 'seed', 'snapshot')
     ORDER BY r.execute_started_at ASC NULLS LAST, r.generated_at ASC
     """
     return run_query(query, (invocation_id,))

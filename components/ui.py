@@ -41,20 +41,11 @@ def contains(df: pd.DataFrame, columns, term: str) -> pd.DataFrame:
 
 def table(df: pd.DataFrame, *, key: str, columns: dict, height="auto", noun: str | None = None):
     """Single-row-selectable table. columns maps source column -> column_config
-    (or a label string); only these columns are shown, in this order.
-    Returns the selected row (Series) or None."""
+    (or a label string); only these columns are shown, in this order. Missing
+    text shows as a blank cell. Returns the selected row (Series) or None."""
     if noun:
         st.caption(f"{len(df):,} {noun} · select a row to open it")
-    config = {
-        col: (st.column_config.TextColumn(cfg) if isinstance(cfg, str) else cfg)
-        for col, cfg in columns.items()
-    }
-    shown = df.reset_index(drop=True)
-    for col in columns:
-        values = shown[col]
-        # Blank out missing text (the grid renders it as "None").
-        if values.dtype == object and values.dropna().map(lambda v: isinstance(v, str)).all():
-            shown[col] = values.fillna("")
+    shown, config = display_frame(df, columns)
     event = st.dataframe(
         shown,
         key=key,
@@ -68,6 +59,23 @@ def table(df: pd.DataFrame, *, key: str, columns: dict, height="auto", noun: str
     )
     rows = event.selection.rows
     return df.iloc[rows[0]] if rows else None
+
+
+def display_frame(df: pd.DataFrame, columns: dict):
+    """(frame, column_config) for st.dataframe. columns maps source column ->
+    column_config or a label string (shown as text). Missing text shows as a
+    blank cell (the grid renders it as "None"); number and date columns keep
+    their type so they sort correctly."""
+    config = {
+        col: (st.column_config.TextColumn(cfg) if isinstance(cfg, str) else cfg)
+        for col, cfg in columns.items()
+    }
+    shown = df.reset_index(drop=True)
+    for col in columns:
+        values = shown[col]
+        if values.dtype == object and values.dropna().map(lambda v: isinstance(v, str)).all():
+            shown[col] = values.fillna("")
+    return shown, config
 
 
 def datetime_column(label: str, **kwargs):

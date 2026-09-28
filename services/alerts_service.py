@@ -1,129 +1,12 @@
-"""Alert queries - test and model failures with smart filtering."""
+"""Alert queries - failure history, the latest build and downstream impact.
+
+Time windows on UTC columns (generated_at, detected_at) use SYSDATE(), which is UTC;
+CURRENT_TIMESTAMP() is in the account timezone (Europe/London)."""
 
 import json
 
 from database import run_query, search_clause
 from config import ELEMENTARY_SCHEMA, DEFAULT_LOOKBACK_DAYS
-
-
-def get_current_test_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str = ""):
-    """
-    Get test failures where the most recent run is a failure.
-    Only includes tests in the current manifest.
-    """
-    search_filter, params = search_clause(["r.test_unique_id", "r.table_name"], search)
-
-    query = f"""
-    WITH ranked AS (
-        SELECT
-            r.test_unique_id,
-            r.test_name,
-            r.test_type,
-            r.status,
-            r.detected_at,
-            r.database_name,
-            r.schema_name,
-            r.table_name,
-            r.column_name,
-            r.test_results_description,
-            r.test_results_query,
-            ROW_NUMBER() OVER (
-                PARTITION BY r.test_unique_id
-                ORDER BY r.detected_at DESC
-            ) as rn
-        FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
-        WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-        {search_filter}
-    )
-    SELECT
-        r.test_unique_id,
-        r.test_name,
-        COALESCE(t.short_name, r.test_name) as short_name,
-        COALESCE(t.test_namespace, r.test_type) as test_namespace,
-        t.test_column_name,
-        t.parent_model_unique_id,
-        r.test_type,
-        r.status,
-        r.detected_at,
-        r.database_name,
-        r.schema_name,
-        r.table_name,
-        r.column_name,
-        r.test_results_description,
-        r.test_results_query
-    FROM ranked r
-    JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
-    WHERE r.rn = 1 AND r.status IN ('fail', 'error')
-    ORDER BY r.detected_at DESC
-    """
-    return run_query(query, params)
-
-
-def get_current_model_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str = ""):
-    """
-    Get current-manifest models where the most recent run failed.
-    """
-    search_filter, params = search_clause(["r.unique_id"], search)
-
-    query = f"""
-    WITH ranked AS (
-        SELECT
-            r.unique_id,
-            r.name,
-            r.status,
-            r.execution_time,
-            r.generated_at,
-            m.database_name,
-            m.schema_name,
-            r.compile_started_at,
-            r.compile_completed_at,
-            r.execute_started_at,
-            r.execute_completed_at,
-            r.message,
-            ROW_NUMBER() OVER (
-                PARTITION BY r.unique_id
-                ORDER BY r.generated_at DESC
-            ) as rn
-        FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
-        JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON r.unique_id = m.unique_id
-        WHERE r.generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-        AND r.resource_type = 'model'
-        {search_filter}
-    )
-    SELECT *
-    FROM ranked
-    WHERE rn = 1 AND status IN ('fail', 'error')
-    ORDER BY generated_at DESC
-    """
-    return run_query(query, params)
-
-
-def get_alert_counts(days: int = DEFAULT_LOOKBACK_DAYS):
-    """Get summary counts of current failures."""
-    query = f"""
-    WITH test_ranked AS (
-        SELECT
-            test_unique_id,
-            status,
-            ROW_NUMBER() OVER (PARTITION BY test_unique_id ORDER BY detected_at DESC) as rn
-        FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
-        JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
-        WHERE detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-    ),
-    model_ranked AS (
-        SELECT
-            unique_id,
-            status,
-            ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY generated_at DESC) as rn
-        FROM {ELEMENTARY_SCHEMA}.dbt_run_results
-        WHERE generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-        AND resource_type = 'model'
-    )
-    SELECT
-        (SELECT COUNT(*) FROM test_ranked WHERE rn = 1 AND status IN ('fail', 'error')) as failed_tests,
-        (SELECT COUNT(*) FROM model_ranked WHERE rn = 1 AND status IN ('fail', 'error')) as failed_models
-    """
-    return run_query(query)
 
 
 def get_historical_test_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str = ""):
@@ -144,7 +27,7 @@ def get_historical_test_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str 
         r.test_results_description
     FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
-    WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    WHERE r.detected_at >= DATEADD(day, -{days}, SYSDATE())
     AND r.status IN ('fail', 'error', 'warn')
     {search_filter}
     ORDER BY r.detected_at DESC
@@ -168,8 +51,8 @@ def get_historical_model_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str
         r.message
     FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON r.unique_id = m.unique_id
-    WHERE r.generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-    AND r.resource_type = 'model'
+    WHERE r.generated_at >= DATEADD(day, -{days}, SYSDATE())
+    AND r.resource_type IN ('model', 'seed', 'snapshot')
     AND r.status IN ('fail', 'error')
     {search_filter}
     ORDER BY r.generated_at DESC
@@ -183,11 +66,11 @@ def get_historical_alert_counts(days: int = DEFAULT_LOOKBACK_DAYS):
     query = f"""
     SELECT
         (SELECT COUNT(*) FROM {ELEMENTARY_SCHEMA}.elementary_test_results
-         WHERE detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+         WHERE detected_at >= DATEADD(day, -{days}, SYSDATE())
          AND status IN ('fail', 'error', 'warn')) as failed_tests,
         (SELECT COUNT(*) FROM {ELEMENTARY_SCHEMA}.dbt_run_results
-         WHERE generated_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-         AND resource_type = 'model'
+         WHERE generated_at >= DATEADD(day, -{days}, SYSDATE())
+         AND resource_type IN ('model', 'seed', 'snapshot')
          AND status IN ('fail', 'error')) as failed_models
     """
     return run_query(query)
@@ -205,254 +88,15 @@ def get_project_test_status_history(days: int = DEFAULT_LOOKBACK_DAYS):
         t.unique_id IS NOT NULL as is_current
     FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
-    WHERE r.detected_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    WHERE r.detected_at >= DATEADD(day, -{days}, SYSDATE())
     ORDER BY r.test_unique_id, r.detected_at ASC
     """
     return run_query(query)
 
 
-def get_current_issue_summary(days: int = DEFAULT_LOOKBACK_DAYS):
-    """Get combined current model and test issues for homepage summary."""
-    query = f"""
-    WITH model_all AS (
-        SELECT
-            r.name as object_name,
-            r.unique_id,
-            'Model' as issue_type,
-            r.status,
-            r.generated_at as event_at,
-            r.message
-        FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
-        WHERE r.resource_type = 'model'
-    ),
-    model_window AS (
-        SELECT *
-        FROM model_all
-        WHERE event_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-    ),
-    model_window_agg AS (
-        SELECT
-            object_name,
-            COUNT_IF(status IN ('fail', 'error')) as failure_count,
-            COUNT(*) as total_runs
-        FROM model_window
-        GROUP BY object_name
-    ),
-    -- Source of truth for currently-defined models (refreshed from manifest
-    -- on every dbt run). JOINing against this means deleted models drop off
-    -- the dashboard immediately, regardless of when their last failure was.
-    current_models AS (
-        SELECT DISTINCT name as object_name
-        FROM {ELEMENTARY_SCHEMA}.dbt_models
-    ),
-    model_latest AS (
-        SELECT
-            ma.object_name,
-            ma.unique_id,
-            ma.status as current_status
-        FROM model_all ma
-        JOIN current_models cm USING (object_name)
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY ma.object_name ORDER BY ma.event_at DESC) = 1
-    ),
-    model_last_success AS (
-        SELECT
-            object_name,
-            MAX(event_at) as last_success_at
-        FROM model_all
-        WHERE status = 'success'
-        GROUP BY object_name
-    ),
-    model_agg AS (
-        SELECT
-            b.object_name,
-            b.issue_type,
-            COALESCE(w.failure_count, 0) as failure_count,
-            COALESCE(w.total_runs, 0) as total_runs,
-            MIN(
-                CASE
-                    WHEN b.status IN ('fail', 'error')
-                     AND b.event_at > COALESCE(s.last_success_at, TO_TIMESTAMP('1970-01-01'))
-                    THEN b.event_at
-                END
-            ) as first_issue_at,
-            MAX(CASE WHEN b.status IN ('fail', 'error') THEN b.event_at END) as last_issue_at,
-            MAX(
-                CASE
-                    WHEN b.status IN ('fail', 'error')
-                     AND b.event_at > COALESCE(s.last_success_at, TO_TIMESTAMP('1970-01-01'))
-                    THEN b.event_at
-                END
-            ) as latest_failure_at
-        FROM model_all b
-        LEFT JOIN model_last_success s ON b.object_name = s.object_name
-        LEFT JOIN model_window_agg w ON b.object_name = w.object_name
-        GROUP BY b.object_name, b.issue_type, w.failure_count, w.total_runs
-    ),
-    model_failure_message AS (
-        SELECT
-            b.object_name,
-            b.message as sample_message
-        FROM model_all b
-        JOIN model_agg a
-          ON b.object_name = a.object_name
-         AND b.event_at = a.latest_failure_at
-        WHERE b.status IN ('fail', 'error')
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY b.object_name ORDER BY b.event_at DESC) = 1
-    ),
-    test_all AS (
-        SELECT
-            r.table_name as object_name,
-            'Test Area' as issue_type,
-            COALESCE(
-                REGEXP_REPLACE(r.test_unique_id, '^test\\.[^.]+\\.', ''),
-                CONCAT(
-                    COALESCE(r.table_name, ''),
-                    '||',
-                    COALESCE(COALESCE(t.short_name, r.test_name), '')
-                )
-            ) as logical_test_key,
-            r.test_unique_id,
-            r.status,
-            r.detected_at as event_at,
-            COALESCE(t.short_name, r.test_name) as test_name
-        FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
-        LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
-        WHERE r.table_name IS NOT NULL
-    ),
-    test_window AS (
-        SELECT *
-        FROM test_all
-        WHERE event_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
-    ),
-    test_window_agg AS (
-        SELECT
-            logical_test_key,
-            COUNT_IF(status IN ('fail', 'error')) as failure_count,
-            COUNT(*) as total_runs
-        FROM test_window
-        GROUP BY logical_test_key
-    ),
-    -- Source of truth for currently-defined tests. Removed tests drop off.
-    current_tests AS (
-        SELECT DISTINCT unique_id as test_unique_id
-        FROM {ELEMENTARY_SCHEMA}.dbt_tests
-    ),
-    test_latest AS (
-        SELECT
-            ta.object_name,
-            ta.logical_test_key,
-            ta.status as current_status
-        FROM test_all ta
-        JOIN current_tests ct USING (test_unique_id)
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY ta.logical_test_key ORDER BY ta.event_at DESC) = 1
-    ),
-    test_last_pass AS (
-        SELECT
-            object_name,
-            logical_test_key,
-            MAX(event_at) as last_pass_at
-        FROM test_all
-        WHERE status = 'pass'
-        GROUP BY object_name, logical_test_key
-    ),
-    test_agg_per_check AS (
-        SELECT
-            b.object_name,
-            b.issue_type,
-            b.logical_test_key,
-            ANY_VALUE(b.test_name) as test_name,
-            COALESCE(w.failure_count, 0) as failure_count,
-            COALESCE(w.total_runs, 0) as total_runs,
-            MIN(
-                CASE
-                    WHEN b.status <> 'pass'
-                     AND b.event_at > COALESCE(p.last_pass_at, TO_TIMESTAMP('1970-01-01'))
-                    THEN b.event_at
-                END
-            ) as first_issue_at,
-            MAX(CASE WHEN b.status IN ('fail', 'error') THEN b.event_at END) as last_issue_at
-        FROM test_all b
-        LEFT JOIN test_last_pass p
-            ON b.object_name = p.object_name
-           AND b.logical_test_key = p.logical_test_key
-        LEFT JOIN test_window_agg w
-            ON b.logical_test_key = w.logical_test_key
-        GROUP BY b.object_name, b.issue_type, b.logical_test_key, w.failure_count, w.total_runs
-    ),
-    test_filtered AS (
-        SELECT
-            a.object_name,
-            a.issue_type,
-            a.logical_test_key,
-            a.test_name,
-            a.failure_count,
-            a.total_runs,
-            a.first_issue_at,
-            a.last_issue_at,
-            l.current_status
-        FROM test_agg_per_check a
-        JOIN test_latest l
-            ON a.object_name = l.object_name
-           AND a.logical_test_key = l.logical_test_key
-        WHERE a.failure_count > 0
-          AND l.current_status <> 'pass'
-          AND NOT (a.failure_count = 1 AND l.current_status = 'pass')
-    ),
-    test_agg AS (
-        SELECT
-            object_name,
-            issue_type,
-            SUM(failure_count) as failure_count,
-            COUNT(*) as affected_checks,
-            COUNT_IF(current_status IN ('fail', 'error')) as currently_failing_checks,
-            MIN(first_issue_at) as first_issue_at,
-            MAX(last_issue_at) as last_issue_at,
-            ANY_VALUE(test_name) as sample_message
-        FROM test_filtered
-        GROUP BY object_name, issue_type
-    )
-    SELECT
-        a.object_name,
-        a.issue_type,
-        l.current_status,
-        a.failure_count,
-        a.total_runs,
-        NULL as affected_checks,
-        a.first_issue_at,
-        a.last_issue_at,
-        m.sample_message,
-        l.unique_id
-    FROM model_agg a
-    JOIN model_latest l USING (object_name)
-    LEFT JOIN model_failure_message m USING (object_name)
-    WHERE l.current_status IN ('fail', 'error')
-      AND a.failure_count > 0
-
-    UNION ALL
-
-    -- Only surface test areas with at least one check currently failing.
-    -- Test areas downgraded to warn (or otherwise no longer erroring) drop off
-    -- instead of lingering with a 'skipped' status.
-    SELECT
-        object_name,
-        issue_type,
-        'fail' as current_status,
-        failure_count,
-        NULL as total_runs,
-        affected_checks,
-        first_issue_at,
-        last_issue_at,
-        sample_message,
-        NULL as unique_id
-    FROM test_agg
-    WHERE currently_failing_checks > 0
-    ORDER BY failure_count DESC, last_issue_at DESC
-    """
-    return run_query(query)
-
-
 def get_latest_run_issues():
-    """Get model/test issues from the most recent build invocation only."""
+    """Model, seed, snapshot and test issues from the most recent build
+    invocation only. event_at is UTC."""
     query = f"""
     WITH latest_invocation AS (
         SELECT invocation_id, created_at, command
@@ -467,12 +111,13 @@ def get_latest_run_issues():
             'Model' as issue_type,
             r.status as current_status,
             1 as issue_count,
-            i.created_at as event_at,
+            TRY_TO_TIMESTAMP_NTZ(r.generated_at) as event_at,
             r.message as summary,
-            r.unique_id as unique_id
+            r.unique_id as unique_id,
+            r.resource_type
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
         JOIN latest_invocation i ON r.invocation_id = i.invocation_id
-        WHERE r.resource_type = 'model'
+        WHERE r.resource_type IN ('model', 'seed', 'snapshot')
           AND r.status IN ('fail', 'error')
     ),
     test_issues AS (
@@ -481,14 +126,15 @@ def get_latest_run_issues():
             'Test' as issue_type,
             CASE WHEN r.status = 'warn' THEN 'warn' ELSE 'fail' END as current_status,
             COUNT(*) as issue_count,
-            i.created_at as event_at,
+            MAX(r.detected_at) as event_at,
             ANY_VALUE(COALESCE(t.short_name, r.test_name)) as summary,
-            NULL as unique_id
+            NULL as unique_id,
+            'test' as resource_type
         FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
         JOIN latest_invocation i ON r.invocation_id = i.invocation_id
         LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
         WHERE r.status IN ('fail', 'error', 'warn')
-        GROUP BY 1, 2, 3, 5
+        GROUP BY 1, 2, 3
     )
     SELECT *
     FROM (
@@ -505,11 +151,12 @@ def get_latest_run_issues():
 
 
 def get_latest_build_summary():
-    """Model status breakdown for the most recent build invocation.
-    Used to surface skip count and ground failures with impact."""
+    """Model, seed and snapshot status breakdown for the most recent build
+    invocation (a model 'warn' built with warnings and counts as ok). Used to
+    surface skip count and ground failures with impact."""
     query = f"""
     WITH latest_invocation AS (
-        SELECT invocation_id, created_at, command, selected
+        SELECT invocation_id, created_at, run_started_at, command, selected
         FROM {ELEMENTARY_SCHEMA}.dbt_invocations
         WHERE LOWER(command) LIKE '%build%'
         ORDER BY created_at DESC
@@ -517,13 +164,13 @@ def get_latest_build_summary():
     ),
     model_agg AS (
         SELECT
-            COUNT_IF(r.status = 'success') as success_count,
+            COUNT_IF(r.status IN ('success', 'warn')) as success_count,
             COUNT_IF(r.status IN ('fail', 'error')) as failed_count,
             COUNT_IF(r.status = 'skipped') as skipped_count,
             COUNT(*) as total_count
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
         JOIN latest_invocation i ON r.invocation_id = i.invocation_id
-        WHERE r.resource_type = 'model'
+        WHERE r.resource_type IN ('model', 'seed', 'snapshot')
     ),
     test_agg AS (
         SELECT
@@ -535,6 +182,7 @@ def get_latest_build_summary():
     SELECT
         i.invocation_id,
         i.created_at,
+        i.run_started_at,
         i.command,
         i.selected,
         m.success_count,
@@ -566,7 +214,7 @@ def get_downstream_skips(invocation_id: str):
         SELECT unique_id, status
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results
         WHERE invocation_id = ?
-          AND resource_type = 'model'
+          AND resource_type IN ('model', 'seed', 'snapshot')
     ),
     errored AS (SELECT unique_id FROM run WHERE status IN ('error', 'fail')),
     skipped AS (SELECT unique_id FROM run WHERE status = 'skipped'),

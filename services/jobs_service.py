@@ -3,13 +3,16 @@ invocations grouped into job runs, and schedule checks (start delay, missing
 runs) against config.JOB_SCHEDULES.
 
 Elementary's job_name/job_id are empty, so the job comes from the trigger
-(cause_category) and the dbt selection. All times are UTC (run_started_at).
+(cause_category) and the dbt selection. All times are naive UTC
+(run_started_at), as are the cron schedules; the Jobs page converts them to
+Europe/London for display.
 """
 
 from datetime import timedelta
 
 import pandas as pd
 
+from components.formatting import to_local
 from config import (
     DBT_REPO_URL,
     ELEMENTARY_SCHEMA,
@@ -349,8 +352,8 @@ def _summary_row(job, job_runs, missing, due_slot, now) -> dict:
 
 def _next_expected_text(job, due_slot, now) -> str:
     """Earliest slot still inside the grace period with no run yet ("due"),
-    else the next scheduled time."""
+    else the next scheduled time. Shown in Europe/London."""
     if due_slot is not None:
-        return f"Due since {due_slot:%a %d %b %H:%M}"
+        return f"Due since {to_local(due_slot):%a %d %b %H:%M}"
     upcoming = next_slot(job, now)
-    return f"{upcoming:%a %d %b %H:%M}" if upcoming is not None else ""
+    return f"{to_local(upcoming):%a %d %b %H:%M}" if upcoming is not None else ""

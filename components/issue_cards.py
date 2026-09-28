@@ -10,8 +10,9 @@ import pandas as pd
 import streamlit as st
 
 from components import nav
-from components.formatting import format_timestamp, issue_status
+from components.formatting import format_timestamp, format_when, is_missing, issue_status
 from database import run_query
+from services.jobs_service import commit_url, job_label
 
 
 def _present(value) -> bool:
@@ -41,7 +42,7 @@ def categorize_error(message: str) -> str:
         return "Incremental schema drift"
     if "syntax error" in m or "compilation error" in m:
         return "SQL compilation error"
-    return "Model failure"
+    return "Build failure"
 
 
 def parse_model_error(message: str) -> dict:
@@ -64,11 +65,40 @@ def parse_model_error(message: str) -> dict:
     return out
 
 
+def where_it_broke(row) -> str | None:
+    """Markdown line for the first failing run of an open streak: local time,
+    job (Deploy for a push to main, Daily build, Manual, Local, ...), commit
+    link and GitHub run link. Reads the STREAK_* and job columns of the health
+    service queries; None when there is no streak."""
+    when = row.get("STREAK_RUN_STARTED_AT")
+    if is_missing(when):
+        when = row.get("STREAK_STARTED_AT")
+    if is_missing(when):
+        return None
+    parts = [f"Broke {format_when(when)}", job_label(row.get("JOB_TYPE") if _present(row.get("JOB_TYPE")) else "local")]
+    sha = row.get("GIT_SHA")
+    if _present(sha):
+        parts.append(f"commit [{str(sha)[:7]}]({commit_url(sha)})")
+    run_url = row.get("JOB_RUN_URL")
+    if _present(run_url):
+        parts.append(f"[GitHub run]({run_url})")
+    return " · ".join(parts)
+
+
+def _first_run_button(invocation_id, key):
+    """Button to the run where the open streak started."""
+    if _present(invocation_id) and st.button("Open first failing run", key=key, icon=":material/history:"):
+        nav.open_run(str(invocation_id))
+
+
 def render_model_error_card(object_name, message, unique_id, meta_line, key_prefix,
-                            downstream_skipped=None, downstream_total=None):
-    """Expandable card for one failing model: parsed fields + full error + drill-in.
+                            downstream_skipped=None, downstream_total=None,
+                            broke=None, broke_invocation_id=None, resource_type="model"):
+    """Expandable card for one failing model, seed or snapshot: parsed fields +
+    full error + drill-in.
     downstream_skipped = models skipped downstream in a specific run (run blast radius).
-    downstream_total = models that transitively depend on this one (static DAG impact)."""
+    downstream_total = models that transitively depend on this one (static DAG impact).
+    broke = where_it_broke() line; broke_invocation_id = run where the streak started."""
     parsed = parse_model_error(message)
     title = f"🔴 {object_name} — {parsed['category']}"
     if downstream_skipped:
@@ -81,6 +111,8 @@ def render_model_error_card(object_name, message, unique_id, meta_line, key_pref
     with st.expander(title, expanded=False):
         if meta_line:
             st.caption(meta_line)
+        if broke:
+            st.caption(broke)
         if downstream_skipped:
             st.markdown(f"**Blast radius:** {downstream_skipped} downstream model(s) skipped in this run")
         if downstream_total is not None:
@@ -110,8 +142,9 @@ def render_model_error_card(object_name, message, unique_id, meta_line, key_pref
             st.code(str(message), language="text")
         else:
             st.caption("No error message captured for this run.")
-        if unique_id and st.button("View model", key=f"{key_prefix}_view_{unique_id}"):
+        if unique_id and st.button(f"View {resource_type}", key=f"{key_prefix}_view_{unique_id}"):
             nav.open_model(unique_id)
+        _first_run_button(broke_invocation_id, f"{key_prefix}_first_run_{unique_id}")
 
 
 # --- test cards -------------------------------------------------------------
@@ -165,9 +198,11 @@ def _inspect_query(kind, model_fqn, column, accepted):
     return None
 
 
-def render_test_issue_card(row, key_prefix):
+def render_test_issue_card(row, key_prefix, note=None, broke=None, broke_invocation_id=None):
     """Expandable card for one failing/warning test: what it checks, how many
-    rows failed, accepted values, source, and a button to pull the failing rows."""
+    rows failed, accepted values, source, and a button to pull the failing rows.
+    note = extra caption line; broke = where_it_broke() line;
+    broke_invocation_id = run where the failing streak started."""
     status = (row.get("STATUS") or "").lower()
     icon = "🟡" if status == "warn" else "🔴"
     kind = test_kind(row.get("TEST_NAME"), row.get("TEST_NAMESPACE"))
@@ -197,6 +232,9 @@ def render_test_issue_card(row, key_prefix):
             format_timestamp(row.get("DETECTED_AT")),
         ] if p)
         st.caption(meta)
+        for line in (note, broke):
+            if line:
+                st.caption(line)
 
         failures = row.get("FAILURES")
         if not _present(failures):
@@ -240,8 +278,7 @@ def render_test_issue_card(row, key_prefix):
                     if res.empty:
                         st.info("Query returned no rows.")
                     else:
-                        note = f"{len(res)} row(s)" + (" (showing first 500)" if len(res) > 500 else "")
-                        st.caption(note)
+                        st.caption(f"{len(res)} row(s)" + (" (showing first 500)" if len(res) > 500 else ""))
                         st.dataframe(res.head(500), width="stretch", hide_index=True)
                 except Exception as e:
                     st.error(f"Could not run query: {e}")
@@ -250,3 +287,4 @@ def render_test_issue_card(row, key_prefix):
 
         if tuid and st.button("View test", key=f"{key_prefix}_view_{tuid}"):
             nav.open_test(tuid)
+        _first_run_button(broke_invocation_id, f"{key_prefix}_first_run_{tuid or loc}")

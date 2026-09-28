@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from components import nav, ui
-from components.formatting import format_hours, run_status_label
+from components.formatting import format_hours, run_status_label, to_datetime
 from config import JOB_GRACE_HOURS, JOB_SCHEDULES, JOB_SLOT_WINDOW_HOURS
 from services.jobs_service import JOB_LABELS, commit_url, job_label, job_report, run_links, trigger_label
 
@@ -42,8 +42,8 @@ def render():
     days = nav.days()
     ui.page_header(
         "Jobs",
-        f"dbt runs grouped by GitHub Actions job over the last {days} days. Times are UTC. "
-        "Schedules mirror dbt-scheduled.yml. Elementary records a run when it finishes.",
+        f"dbt runs grouped by GitHub Actions job over the last {days} days. Times are UK time; "
+        "schedules are the cron times in UTC from dbt-scheduled.yml. Elementary records a run when it finishes.",
     )
 
     runs, summary, missing = job_report(days)
@@ -77,14 +77,14 @@ def _render_summary(summary: pd.DataFrame):
         "Select a job to see its history below."
     )
     selected = ui.table(
-        summary,
+        to_datetime(summary.copy(), "LAST_STARTED"),
         key="jobs_summary",
         columns={
             "JOB_LABEL": "Job",
             "SCHEDULE": "Schedule",
             "RUNS": st.column_config.NumberColumn("Runs"),
             "SUCCESS_RATE": st.column_config.NumberColumn("Success", format="%.0f%%"),
-            "LAST_STARTED": ui.datetime_column("Last run (UTC)"),
+            "LAST_STARTED": ui.datetime_column("Last run"),
             "LAST_OUTCOME": "Outcome",
             "LAST_DURATION_MIN": st.column_config.NumberColumn("Duration", format="%.1f min"),
             "MEDIAN_DURATION_MIN": st.column_config.NumberColumn("Median", format="%.1f min"),
@@ -92,7 +92,7 @@ def _render_summary(summary: pd.DataFrame):
             "LAST_DELAY_H": st.column_config.NumberColumn("Delay", format="%.1f h"),
             "MEDIAN_DELAY_H": st.column_config.NumberColumn("Median delay", format="%.1f h"),
             "MISSING": st.column_config.NumberColumn("Missing"),
-            "NEXT_EXPECTED": "Next expected (UTC)",
+            "NEXT_EXPECTED": "Next expected",
         },
     )
     if selected is not None:
@@ -106,14 +106,14 @@ def _render_missing(missing: pd.DataFrame):
         return
     counts = missing["JOB_LABEL"].value_counts()
     st.caption(" · ".join(f"{job}: {n}" for job, n in counts.items()))
-    df = missing.copy()
+    df = to_datetime(missing.copy(), "SLOT")
     df["DAY"] = df["SLOT"].dt.strftime("%a")
     st.dataframe(
         df,
         column_order=["JOB_LABEL", "SLOT", "DAY"],
         column_config={
             "JOB_LABEL": "Job",
-            "SLOT": ui.datetime_column("Scheduled (UTC)"),
+            "SLOT": ui.datetime_column("Scheduled"),
             "DAY": "Day",
         },
         hide_index=True,
@@ -131,7 +131,8 @@ def _render_history(runs: pd.DataFrame):
         found = set(runs["JOB_TYPE"])
         job = next(j for j in list(JOB_LABELS) + sorted(found) if j in found)
     st.subheader(f"Job history: {job_label(job)}" if job else "Job history")
-    df = runs[runs["JOB_TYPE"] == job]
+    # Schedule maths ran in UTC; show UK time from here on.
+    df = to_datetime(runs[runs["JOB_TYPE"] == job].copy(), "STARTED_AT", "SLOT")
     if df.empty:
         ui.empty_state(f"No {job_label(job)} runs in this time range" if job else "No job runs in this time range")
         return
@@ -149,10 +150,10 @@ def _render_history(runs: pd.DataFrame):
 
     columns = {
         "OUTCOME_LABEL": "Outcome",
-        "STARTED_AT": ui.datetime_column("Started (UTC)"),
+        "STARTED_AT": ui.datetime_column("Started"),
     }
     if is_scheduled:
-        columns["SLOT"] = ui.datetime_column("Slot (UTC)")
+        columns["SLOT"] = ui.datetime_column("Slot")
         columns["DELAY_H"] = st.column_config.NumberColumn("Delay", format="%.1f h")
     columns["DURATION_MIN"] = st.column_config.NumberColumn("Duration", format="%.1f min")
     columns["TRIGGER_LABEL"] = "Trigger"
@@ -181,8 +182,10 @@ def _trend_chart(df: pd.DataFrame, field: str, title: str, median):
     if df.empty:
         ui.empty_state(f"No data for {title.lower()}")
         return
-    df = df[["STARTED_AT", field, "OUTCOME", "TRIGGER_LABEL", "SHORT_SHA"]]
-    x = alt.X("STARTED_AT:T", title="Started (UTC)")
+    df = df[["STARTED_AT", field, "OUTCOME", "TRIGGER_LABEL", "SHORT_SHA"]].copy()
+    # London wall-clock time, so the axis does not depend on the browser zone.
+    df["STARTED_AT"] = df["STARTED_AT"].dt.tz_localize(None)
+    x = alt.X("STARTED_AT:T", title="Started")
     y = alt.Y(f"{field}:Q", title=title)
     line = alt.Chart(df).mark_line(strokeWidth=2, color="#4a90d9").encode(x=x, y=y)
     dots = alt.Chart(df).mark_circle(size=70, opacity=1).encode(
@@ -194,7 +197,7 @@ def _trend_chart(df: pd.DataFrame, field: str, title: str, median):
             legend=alt.Legend(title="Outcome", orient="bottom"),
         ),
         tooltip=[
-            alt.Tooltip("STARTED_AT:T", title="Started (UTC)", format="%a %d %b %H:%M"),
+            alt.Tooltip("STARTED_AT:T", title="Started", format="%a %d %b %H:%M"),
             alt.Tooltip(f"{field}:Q", title=title, format=".1f"),
             alt.Tooltip("OUTCOME:N", title="Outcome"),
             alt.Tooltip("TRIGGER_LABEL:N", title="Trigger"),

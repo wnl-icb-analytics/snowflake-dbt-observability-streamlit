@@ -1,8 +1,20 @@
-"""Display formatters and status labels shared across pages."""
+"""Display formatters and status labels shared across pages.
 
-from datetime import datetime
+Timestamps: dbt and elementary write run times in UTC
+(dbt_invocations.run_started_at/run_completed_at/generated_at,
+dbt_run_results.generated_at and execute/compile times,
+elementary_test_results.detected_at, ROW_COUNT_LOG.run_started_at). The
+created_at columns and ROW_COUNT_LOG.recorded_at are in the account timezone,
+Europe/London. The time helpers read naive values in the source zone passed as
+tz (UTC by default) and show them in Europe/London.
+"""
+
+import json
 
 import pandas as pd
+
+UTC = "UTC"
+LOCAL_TZ = "Europe/London"  # account timezone and display timezone
 
 
 def is_missing(value) -> bool:
@@ -15,33 +27,48 @@ def is_missing(value) -> bool:
         return False
 
 
-def format_timestamp(ts) -> str:
-    """Format a timestamp handling both datetime and string types."""
+def to_local(ts, tz: str = UTC):
+    """ts as a tz-aware Europe/London Timestamp, or None. Naive values and
+    strings without an offset are read in tz."""
     if is_missing(ts):
-        return "N/A"
+        return None
     try:
-        return ts.strftime("%Y-%m-%d %H:%M")
-    except AttributeError:
-        return str(ts)[:16] if ts else "N/A"
+        value = pd.Timestamp(ts)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(value):
+        return None
+    if value.tzinfo is None:
+        value = value.tz_localize(tz, ambiguous=False, nonexistent="shift_forward")
+    return value.tz_convert(LOCAL_TZ)
 
 
-def format_relative_time(ts) -> str:
-    """Format a timestamp as relative time (e.g. '2h ago')."""
-    if is_missing(ts):
+def format_timestamp(ts, tz: str = UTC) -> str:
+    """'YYYY-MM-DD HH:MM' in Europe/London. Naive values are read in tz."""
+    local = to_local(ts, tz)
+    return local.strftime("%Y-%m-%d %H:%M") if local is not None else "N/A"
+
+
+def format_relative_time(ts, tz: str = UTC) -> str:
+    """Time since ts, e.g. '2h ago'. Naive values are read in tz."""
+    local = to_local(ts, tz)
+    if local is None:
         return "N/A"
-    try:
-        if isinstance(ts, str):
-            ts = datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S")
-        seconds = (datetime.now() - ts).total_seconds()
-        if seconds < 60:
-            return "Just now"
-        if seconds < 3600:
-            return f"{int(seconds // 60)}m ago"
-        if seconds < 86400:
-            return f"{int(seconds // 3600)}h ago"
-        return f"{int(seconds // 86400)}d ago"
-    except Exception:
-        return format_timestamp(ts)
+    seconds = (pd.Timestamp.now(tz=UTC) - local).total_seconds()
+    if seconds < 60:
+        return "Just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
+
+
+def format_when(ts, tz: str = UTC) -> str:
+    """Local time with relative time, e.g. '2026-09-24 15:52 (4d ago)'."""
+    if to_local(ts, tz) is None:
+        return "N/A"
+    return f"{format_timestamp(ts, tz)} ({format_relative_time(ts, tz)})"
 
 
 def truncate(text, max_len: int = 50) -> str:
@@ -92,6 +119,20 @@ def format_row_count(count, with_sign: bool = False) -> str:
     else:
         formatted = str(count)
     return f"+{formatted}" if with_sign and count > 0 else formatted
+
+
+def json_list(value) -> list[str]:
+    """Items of a JSON array string such as '["a", "b"]'; [] when empty or
+    not an array."""
+    if is_missing(value) or not str(value).strip():
+        return []
+    try:
+        items = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError):
+        return [str(value)]
+    if isinstance(items, (list, tuple)):
+        return [str(i) for i in items if not is_missing(i) and str(i).strip()]
+    return [str(items)] if str(items).strip() else []
 
 
 def issue_status(status) -> str:
@@ -145,11 +186,26 @@ def run_status_label(row) -> str:
     return "🟢 Passed"
 
 
-def to_datetime(df: pd.DataFrame, *columns) -> pd.DataFrame:
-    """Parse text timestamp columns (elementary stores some as strings) to
-    tz-naive datetimes so tables can format and sort them."""
+def to_datetime(df: pd.DataFrame, *columns, tz: str = UTC) -> pd.DataFrame:
+    """Parse timestamp columns (elementary stores some as text) to tz-aware
+    Europe/London datetimes so tables and charts show local time and sort.
+    Naive values are read in tz."""
     for col in columns:
         if col in df.columns:
-            parsed = pd.to_datetime(df[col], errors="coerce", utc=True)
-            df[col] = parsed.dt.tz_localize(None)
+            df[col] = _to_local_series(df[col], tz)
     return df
+
+
+def _to_local_series(values: pd.Series, tz: str) -> pd.Series:
+    parsed = None
+    if values.dtype == object:
+        try:
+            # Text timestamps vary in precision; ISO8601 parses them all.
+            parsed = pd.to_datetime(values, errors="coerce", format="ISO8601")
+        except (TypeError, ValueError):
+            parsed = None
+    if parsed is None:
+        parsed = pd.to_datetime(values, errors="coerce")
+    if parsed.dt.tz is None:
+        parsed = parsed.dt.tz_localize(tz, ambiguous="NaT", nonexistent="shift_forward")
+    return parsed.dt.tz_convert(LOCAL_TZ)

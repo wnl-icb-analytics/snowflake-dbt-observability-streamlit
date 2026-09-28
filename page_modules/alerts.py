@@ -1,4 +1,4 @@
-"""Alerts page - current and historical test and model failures."""
+"""Alerts page - failure history and trends. What is failing now is on Home."""
 
 import pandas as pd
 import streamlit as st
@@ -7,9 +7,6 @@ from components import nav, ui
 from components.charts import project_test_failures_chart
 from components.formatting import format_hours, status_label, to_datetime, truncate
 from services.alerts_service import (
-    get_alert_counts,
-    get_current_model_failures,
-    get_current_test_failures,
     get_historical_alert_counts,
     get_historical_model_failures,
     get_historical_test_failures,
@@ -24,8 +21,9 @@ def _calculate_test_resolution_metrics(history_df: pd.DataFrame):
         empty_episodes = pd.DataFrame(columns=["TEST_UNIQUE_ID", "FAIL_STARTED_AT", "RESOLVED_AT", "RESOLUTION_HOURS", "FAILURE_RUNS"])
         return empty_daily, empty_episodes
 
-    df = history_df.copy()
-    df["DETECTED_AT"] = pd.to_datetime(df["DETECTED_AT"])
+    # London wall-clock times, so days are London days.
+    df = to_datetime(history_df.copy(), "DETECTED_AT")
+    df["DETECTED_AT"] = df["DETECTED_AT"].dt.tz_localize(None)
     df["DATE"] = df["DETECTED_AT"].dt.floor("D")
     df["IS_FAIL"] = df["STATUS"].isin(["fail", "error"])
     df["IS_PASS"] = df["STATUS"] == "pass"
@@ -99,44 +97,14 @@ def _calculate_test_resolution_metrics(history_df: pd.DataFrame):
 
 def render():
     days = nav.days()
-    ui.page_header("Alerts", f"What is failing now, and every failure in the last {days} days.")
+    ui.page_header(
+        "Alerts",
+        f"Every test failure, warning and build failure in the last {days} days. "
+        "Home shows what is failing now.",
+    )
 
     search = st.text_input("Search", placeholder="Model or test name", key="alerts_search")
-
-    tab_active, tab_history = st.tabs(["Active", "History"])
-    with tab_active:
-        _render_active(days, search)
-    with tab_history:
-        _render_history(days, search)
-
-
-def _render_active(days: int, search: str):
-    """Tests and models whose most recent run in the range failed."""
-    st.caption("Tests and models where the most recent run failed.")
-
-    counts = get_alert_counts(days=days)
-    if counts.empty:
-        ui.empty_state("No data available")
-        return
-
-    row = counts.iloc[0]
-    failed_tests = int(row["FAILED_TESTS"] or 0)
-    failed_models = int(row["FAILED_MODELS"] or 0)
-    if failed_tests + failed_models == 0:
-        ui.empty_state("No current failures: all tests and models are passing", ok=True)
-        return
-
-    ui.metric_row([
-        ("Total failures", failed_tests + failed_models),
-        ("Test failures", failed_tests),
-        ("Model failures", failed_models),
-    ])
-
-    st.subheader("Failing tests")
-    _test_table(get_current_test_failures(days, search), key="active_tests_table", search=search)
-
-    st.subheader("Failing models")
-    _model_table(get_current_model_failures(days, search), key="active_models_table", search=search)
+    _render_history(days, search)
 
 
 def _render_history(days: int, search: str):
@@ -153,18 +121,17 @@ def _render_history(days: int, search: str):
         ui.empty_state("No failures in this time range", ok=True)
         return
 
-    metrics = [("Test failures", failed_tests), ("Model failures", failed_models)]
+    metrics = [
+        ("Test failures and warnings", failed_tests, {"help": "Test results with fail, error or warn in the range"}),
+        ("Build failures", failed_models, {"help": "Model, seed and snapshot runs that errored in the range"}),
+    ]
     test_history_df = get_project_test_status_history(days)
     trend_df, episodes_df = _calculate_test_resolution_metrics(test_history_df)
     if not test_history_df.empty:
-        current_history_df = test_history_df[test_history_df["IS_CURRENT"]]
-        latest_status_df = current_history_df.sort_values("DETECTED_AT").groupby("TEST_UNIQUE_ID").tail(1)
-        open_failures = int(latest_status_df["STATUS"].isin(["fail", "error"]).sum())
         median_resolution = episodes_df["RESOLUTION_HOURS"].median() if not episodes_df.empty else None
         p75_resolution = episodes_df["RESOLUTION_HOURS"].quantile(0.75) if not episodes_df.empty else None
         metrics += [
-            ("Open test failures", open_failures),
-            ("Median resolution", format_hours(median_resolution)),
+            ("Median resolution", format_hours(median_resolution), {"help": "Time from a test's first failure to its next pass"}),
             ("P75 resolution", format_hours(p75_resolution)),
         ]
     ui.metric_row(metrics)
@@ -174,16 +141,17 @@ def _render_history(days: int, search: str):
         st.caption("Daily failed test runs, distinct failing tests, and fail-to-pass resolutions.")
         st.altair_chart(project_test_failures_chart(trend_df))
 
-    st.subheader("Test failures")
+    st.subheader("Test failures and warnings")
     _test_table(get_historical_test_failures(days, search), key="history_tests_table", search=search, limit_note=True)
 
-    st.subheader("Model failures")
+    st.subheader("Build failures")
+    st.caption("Failed model, seed and snapshot runs.")
     _model_table(get_historical_model_failures(days, search), key="history_models_table", search=search, limit_note=True)
 
 
 def _test_table(df: pd.DataFrame, *, key: str, search: str, limit_note: bool = False):
     if df.empty:
-        ui.empty_state("No test failures match the search" if search else "No test failures", ok=not search)
+        ui.empty_state("No test failures or warnings match the search" if search else "No test failures or warnings", ok=not search)
         return
     if limit_note and len(df) >= 200:
         st.caption("Showing the 200 most recent.")
@@ -192,7 +160,7 @@ def _test_table(df: pd.DataFrame, *, key: str, search: str, limit_note: bool = F
     selected = ui.table(
         df,
         key=key,
-        noun="test failures",
+        noun="test failures and warnings",
         columns={
             "STATUS_LABEL": "Status",
             "TABLE_NAME": "Model",
@@ -208,7 +176,7 @@ def _test_table(df: pd.DataFrame, *, key: str, search: str, limit_note: bool = F
 
 def _model_table(df: pd.DataFrame, *, key: str, search: str, limit_note: bool = False):
     if df.empty:
-        ui.empty_state("No model failures match the search" if search else "No model failures", ok=not search)
+        ui.empty_state("No build failures match the search" if search else "No build failures", ok=not search)
         return
     if limit_note and len(df) >= 200:
         st.caption("Showing the 200 most recent.")
@@ -218,7 +186,7 @@ def _model_table(df: pd.DataFrame, *, key: str, search: str, limit_note: bool = 
     selected = ui.table(
         df,
         key=key,
-        noun="model failures",
+        noun="build failures",
         columns={
             "STATUS_LABEL": "Status",
             "NAME": "Model",

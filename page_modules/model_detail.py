@@ -1,11 +1,13 @@
-"""Model detail view - full view of a single model."""
+"""Model detail view - full view of a single model, snapshot or seed."""
+
+import json
 
 import pandas as pd
 import streamlit as st
 
 from components import nav, ui
 from components.charts import execution_time_chart, row_count_change_chart, row_count_trend_chart
-from components.formatting import format_row_count, format_timestamp, status_label, to_datetime
+from components.formatting import format_row_count, format_timestamp, json_list, status_label, to_datetime
 from services.models_service import (
     get_model_compiled_code,
     get_model_details,
@@ -34,6 +36,23 @@ def _row_count_metric(details, latest_row_count_df):
     return ("Row count", format_row_count(row_data["ROW_COUNT"]), {"delta": delta})
 
 
+def _owners(details) -> list[str]:
+    """Owner names from meta.owner (a name, a list, or {"name": ...}), else the
+    owner column. Elementary stores a {"name": ...} owner as ["name"]."""
+    try:
+        meta = json.loads(details.get("META") or "{}")
+    except (TypeError, ValueError):
+        meta = {}
+    owner = meta.get("owner") if isinstance(meta, dict) else None
+    if isinstance(owner, dict):
+        owner = owner.get("name") or [str(v) for v in owner.values() if v]
+    if isinstance(owner, str) and owner.strip():
+        return [owner.strip()]
+    if isinstance(owner, list) and owner:
+        return [str(o) for o in owner if o]
+    return json_list(details.get("OWNER"))
+
+
 def render(unique_id: str):
     details_df = get_model_details(unique_id)
     if details_df.empty:
@@ -44,11 +63,13 @@ def render(unique_id: str):
     days = nav.days()
     ui.page_header(details["NAME"], f"`{unique_id}`")
 
+    owners = _owners(details)
+    tags = json_list(details.get("TAGS"))
     meta = [
         ".".join(p for p in [details.get("DATABASE_NAME"), details.get("SCHEMA_NAME")] if p),
         details.get("MATERIALIZATION") or "",
-        f"owner {details['OWNER']}" if details.get("OWNER") else "",
-        f"tags {details['TAGS']}" if details.get("TAGS") and details["TAGS"] != "[]" else "",
+        f"owner {', '.join(owners)}" if owners else "",
+        f"tags {', '.join(tags)}" if tags else "",
     ]
     st.caption(" · ".join(p for p in meta if p))
     path = details.get("ORIGINAL_PATH") or details.get("PATH")
@@ -103,7 +124,7 @@ def render(unique_id: str):
             st.altair_chart(execution_time_chart(trend_df, height=240))
 
     if not latest_row_count_df.empty:
-        row_count_df = get_model_row_count_history(details["NAME"], days)
+        row_count_df = to_datetime(get_model_row_count_history(details["NAME"], days).copy(), "RUN_STARTED_AT")
         st.subheader("Row count")
         if len(row_count_df) > 1:
             chart_col1, chart_col2 = st.columns(2)
@@ -136,7 +157,7 @@ def _render_tests(unique_id: str, days: int):
         ui.empty_state("No tests defined on this model")
         return
 
-    tests_df = tests_df.copy()
+    tests_df = to_datetime(tests_df.copy(), "LAST_RUN")
     tests_df["STATUS_LABEL"] = tests_df["LATEST_STATUS"].map(status_label)
     selected = ui.table(
         tests_df,
