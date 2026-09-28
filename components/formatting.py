@@ -170,18 +170,25 @@ def status_label(status, dot: bool = True) -> str:
     return label if dot else label.split(" ", 1)[1]
 
 
-def run_status_label(row) -> str:
-    """Overall status of an invocation: failed if any model or test failed,
-    warnings if only test warnings, skipped if nothing succeeded, else passed."""
-    def n(col):
-        value = row.get(col)
-        return 0 if is_missing(value) else int(value)
+def _count(row, col) -> int:
+    value = row.get(col)
+    return 0 if is_missing(value) else int(value)
 
-    if n("FAIL_COUNT") or n("TESTS_FAILED"):
+
+def run_failed(row) -> bool:
+    """True when a model, seed, snapshot or test of the invocation failed or
+    errored (counts from jobs_service.run_counts_sql)."""
+    return bool(_count(row, "FAIL_COUNT") or _count(row, "TESTS_FAILED"))
+
+
+def run_status_label(row) -> str:
+    """Overall status of an invocation: failed as in run_failed, warnings if
+    only test warnings, skipped if nothing succeeded, else passed."""
+    if run_failed(row):
         return "🔴 Failed"
-    if n("TESTS_WARNED"):
+    if _count(row, "TESTS_WARNED"):
         return "🟡 Warnings"
-    if n("SKIPPED_COUNT") and not n("SUCCESS_COUNT"):
+    if _count(row, "SKIPPED_COUNT") and not _count(row, "SUCCESS_COUNT"):
         return "⚪ Skipped"
     return "🟢 Passed"
 

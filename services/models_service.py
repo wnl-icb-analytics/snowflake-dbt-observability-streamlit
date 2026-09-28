@@ -247,7 +247,12 @@ def get_growth_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         s.trend
     FROM bounds b
     JOIN series s ON s.model_key = b.model_key
-    LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON LOWER(m.name) = b.model_key
+    -- One unique_id per name, so models sharing a name do not duplicate rows.
+    LEFT JOIN (
+        SELECT LOWER(name) as model_key, MIN(unique_id) as unique_id
+        FROM {ELEMENTARY_SCHEMA}.dbt_models
+        GROUP BY LOWER(name)
+    ) m ON m.model_key = b.model_key
     ORDER BY ABS(COALESCE(change_pct, 0)) DESC, b.model_name
     """
     return run_query(query)
