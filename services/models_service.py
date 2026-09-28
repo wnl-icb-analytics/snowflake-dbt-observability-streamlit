@@ -210,12 +210,10 @@ def get_growth_summary(days: int = DEFAULT_LOOKBACK_DAYS):
         WHERE run_started_at >= DATEADD(day, -{days}, SYSDATE())
     ),
     daily AS (
-        SELECT model_key, DATE_TRUNC('day', run_started_at) as day, row_count
+        -- run_started_at is UTC; bucket by London day.
+        SELECT model_key, DATE_TRUNC('day', CONVERT_TIMEZONE('UTC', 'Europe/London', run_started_at)) as day, row_count
         FROM log
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY model_key, DATE_TRUNC('day', run_started_at)
-            ORDER BY run_started_at DESC
-        ) = 1
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY model_key, day ORDER BY run_started_at DESC) = 1
     ),
     series AS (
         SELECT model_key, ARRAY_AGG(row_count) WITHIN GROUP (ORDER BY day) as trend
