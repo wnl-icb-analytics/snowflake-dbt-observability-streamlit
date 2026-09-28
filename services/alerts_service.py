@@ -1,6 +1,8 @@
 """Alert queries - test and model failures with smart filtering."""
 
-from database import run_query
+import json
+
+from database import run_query, search_clause
 from config import ELEMENTARY_SCHEMA, DEFAULT_LOOKBACK_DAYS
 
 
@@ -9,7 +11,7 @@ def get_current_test_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str = "
     Get test failures where the most recent run is a failure.
     Only includes tests in the current manifest.
     """
-    search_filter = f"AND LOWER(r.test_unique_id) LIKE LOWER('%{search}%')" if search else ""
+    search_filter, params = search_clause(["r.test_unique_id", "r.table_name"], search)
 
     query = f"""
     WITH ranked AS (
@@ -54,14 +56,14 @@ def get_current_test_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str = "
     WHERE r.rn = 1 AND r.status IN ('fail', 'error')
     ORDER BY r.detected_at DESC
     """
-    return run_query(query)
+    return run_query(query, params)
 
 
 def get_current_model_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str = ""):
     """
     Get current-manifest models where the most recent run failed.
     """
-    search_filter = f"AND LOWER(r.unique_id) LIKE LOWER('%{search}%')" if search else ""
+    search_filter, params = search_clause(["r.unique_id"], search)
 
     query = f"""
     WITH ranked AS (
@@ -93,7 +95,7 @@ def get_current_model_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str = 
     WHERE rn = 1 AND status IN ('fail', 'error')
     ORDER BY generated_at DESC
     """
-    return run_query(query)
+    return run_query(query, params)
 
 
 def get_alert_counts(days: int = DEFAULT_LOOKBACK_DAYS):
@@ -126,7 +128,7 @@ def get_alert_counts(days: int = DEFAULT_LOOKBACK_DAYS):
 
 def get_historical_test_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str = ""):
     """Get all test failures in time period (not just current failures)."""
-    search_filter = f"AND LOWER(r.test_unique_id) LIKE LOWER('%{search}%')" if search else ""
+    search_filter, params = search_clause(["r.test_unique_id", "r.table_name"], search)
 
     query = f"""
     SELECT
@@ -148,12 +150,12 @@ def get_historical_test_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str 
     ORDER BY r.detected_at DESC
     LIMIT 200
     """
-    return run_query(query)
+    return run_query(query, params)
 
 
 def get_historical_model_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str = ""):
     """Get all model failures in time period (not just current failures)."""
-    search_filter = f"AND LOWER(r.unique_id) LIKE LOWER('%{search}%')" if search else ""
+    search_filter, params = search_clause(["r.unique_id"], search)
 
     query = f"""
     SELECT
@@ -173,7 +175,7 @@ def get_historical_model_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str
     ORDER BY r.generated_at DESC
     LIMIT 200
     """
-    return run_query(query)
+    return run_query(query, params)
 
 
 def get_historical_alert_counts(days: int = DEFAULT_LOOKBACK_DAYS):
@@ -563,7 +565,7 @@ def get_downstream_skips(invocation_id: str):
     run AS (
         SELECT unique_id, status
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results
-        WHERE invocation_id = '{invocation_id}'
+        WHERE invocation_id = ?
           AND resource_type = 'model'
     ),
     errored AS (SELECT unique_id FROM run WHERE status IN ('error', 'fail')),
@@ -581,23 +583,22 @@ def get_downstream_skips(invocation_id: str):
     JOIN skipped s ON s.unique_id = d.node
     GROUP BY d.root
     """
-    return run_query(query)
+    return run_query(query, (invocation_id,))
 
 
 def get_downstream_model_counts(unique_ids):
     """Transitive count of models that depend on each given model (static DAG
     impact / dependents), walking dbt_models.depends_on_nodes."""
-    ids = [str(u) for u in unique_ids if u]
+    ids = sorted({str(u) for u in unique_ids if u})
     if not ids:
         return run_query("SELECT NULL AS unique_id, 0 AS downstream_count WHERE 1=0")
-    values = ", ".join("('" + i.replace("'", "''") + "')" for i in ids)
     query = f"""
     WITH edges AS (
         SELECT m.unique_id AS child, f.value::string AS parent
         FROM {ELEMENTARY_SCHEMA}.dbt_models m,
              LATERAL FLATTEN(input => PARSE_JSON(m.depends_on_nodes)) f
     ),
-    roots AS (SELECT column1 AS unique_id FROM VALUES {values}),
+    roots AS (SELECT value::string AS unique_id FROM TABLE(FLATTEN(input => PARSE_JSON(?)))),
     downstream(root, node, depth) AS (
         SELECT unique_id, unique_id, 0 FROM roots
         UNION ALL
@@ -611,7 +612,7 @@ def get_downstream_model_counts(unique_ids):
     FROM downstream
     GROUP BY root
     """
-    return run_query(query)
+    return run_query(query, (json.dumps(ids),))
 
 
 def get_latest_build_test_results():

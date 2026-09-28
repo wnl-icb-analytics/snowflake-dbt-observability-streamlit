@@ -4,8 +4,8 @@ from database import run_query
 from config import ELEMENTARY_SCHEMA, DEFAULT_LOOKBACK_DAYS
 
 
-def get_invocations(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 50, offset: int = 0):
-    """Get dbt invocations with summary stats."""
+def get_invocations(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 1000):
+    """Get dbt invocations in the range with model and test status counts."""
     query = f"""
     WITH run_stats AS (
         SELECT
@@ -52,17 +52,7 @@ def get_invocations(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 50, offset: 
     LEFT JOIN test_stats t ON i.invocation_id = t.invocation_id
     WHERE i.created_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
     ORDER BY i.created_at DESC
-    LIMIT {limit} OFFSET {offset}
-    """
-    return run_query(query)
-
-
-def get_invocations_count(days: int = DEFAULT_LOOKBACK_DAYS):
-    """Get total count of invocations in time period."""
-    query = f"""
-    SELECT COUNT(*) as total
-    FROM {ELEMENTARY_SCHEMA}.dbt_invocations
-    WHERE created_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    LIMIT {limit}
     """
     return run_query(query)
 
@@ -84,9 +74,9 @@ def get_invocation_details(invocation_id: str):
         TRY_PARSE_JSON(i.target_adapter_specific_fields):warehouse::VARCHAR as warehouse,
         TIMESTAMPDIFF('second', TRY_TO_TIMESTAMP(i.run_started_at), TRY_TO_TIMESTAMP(i.run_completed_at)) as duration_seconds
     FROM {ELEMENTARY_SCHEMA}.dbt_invocations i
-    WHERE i.invocation_id = '{invocation_id}'
+    WHERE i.invocation_id = ?
     """
-    return run_query(query)
+    return run_query(query, (invocation_id,))
 
 
 def get_invocation_models(invocation_id: str):
@@ -107,11 +97,11 @@ def get_invocation_models(invocation_id: str):
         COALESCE(m.original_path, m.path) as model_path
     FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON r.unique_id = m.unique_id
-    WHERE r.invocation_id = '{invocation_id}'
+    WHERE r.invocation_id = ?
     AND r.resource_type = 'model'
     ORDER BY r.execute_started_at ASC NULLS LAST, r.generated_at ASC
     """
-    return run_query(query)
+    return run_query(query, (invocation_id,))
 
 
 def get_invocation_tests(invocation_id: str):
@@ -141,11 +131,11 @@ def get_invocation_tests(invocation_id: str):
     FROM {ELEMENTARY_SCHEMA}.elementary_test_results r
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_tests t ON r.test_unique_id = t.unique_id
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON m.unique_id = t.parent_model_unique_id
-    WHERE r.invocation_id = '{invocation_id}'
+    WHERE r.invocation_id = ?
     ORDER BY
         CASE WHEN r.status IN ('fail', 'error') THEN 0
              WHEN r.status = 'warn' THEN 1
              ELSE 2 END,
         r.detected_at ASC
     """
-    return run_query(query)
+    return run_query(query, (invocation_id,))
