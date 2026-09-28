@@ -56,14 +56,7 @@ def _days_column(label: str, **kwargs):
 
 def _static_table(df: pd.DataFrame, *, columns: dict, height="auto"):
     """Read-only table; columns maps source column -> column_config or label."""
-    config = {
-        col: (st.column_config.TextColumn(cfg) if isinstance(cfg, str) else cfg)
-        for col, cfg in columns.items()
-    }
-    shown = df.reset_index(drop=True)
-    for col in columns:
-        if shown[col].dtype == object:
-            shown[col] = shown[col].fillna("")
+    shown, config = ui.display_frame(df, columns)
     st.dataframe(
         shown,
         column_order=list(columns),

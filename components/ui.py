@@ -50,13 +50,7 @@ def table(df: pd.DataFrame, *, key: str, columns: dict, height="auto", noun: str
     values show as blank cells. Returns the selected row (Series) or None."""
     if noun:
         st.caption(f"{len(df):,} {noun} · select a row to open it")
-    config = {
-        col: (st.column_config.TextColumn(cfg) if isinstance(cfg, str) else cfg)
-        for col, cfg in columns.items()
-    }
-    shown = df.reset_index(drop=True)
-    for col in columns:
-        config[col] = _blank_missing(shown, col, config[col])
+    shown, config = display_frame(df, columns)
     event = st.dataframe(
         shown,
         key=key,
@@ -72,10 +66,24 @@ def table(df: pd.DataFrame, *, key: str, columns: dict, height="auto", noun: str
     return df.iloc[rows[0]] if rows else None
 
 
+def display_frame(df: pd.DataFrame, columns: dict):
+    """(frame, column_config) for st.dataframe. columns maps source column ->
+    column_config or a label string (shown as text). Missing values show as
+    blank cells; the grid renders them as "None"."""
+    config = {
+        col: (st.column_config.TextColumn(cfg) if isinstance(cfg, str) else cfg)
+        for col, cfg in columns.items()
+    }
+    shown = df.reset_index(drop=True)
+    for col in columns:
+        config[col] = _blank_missing(shown, col, config[col])
+    return shown, config
+
+
 def _blank_missing(shown: pd.DataFrame, col: str, cfg: dict) -> dict:
     """Show missing values as blank cells; the grid renders them as "None".
-    Number and datetime columns with gaps are formatted to text in place (they
-    then sort as text); returns the column config to use."""
+    Number, datetime, date and time columns with gaps are formatted to text in
+    place (they then sort as text); returns the column config to use."""
     values = shown[col]
     if not values.isna().any():
         return cfg
@@ -86,8 +94,8 @@ def _blank_missing(shown: pd.DataFrame, col: str, cfg: dict) -> dict:
         return cfg
     if kind == "number":
         shown[col] = values.map(lambda v: "" if is_missing(v) else _format_number(v, fmt))
-    elif kind == "datetime":
-        pattern = _strftime_pattern(fmt)
+    elif kind in _DEFAULT_PATTERNS:
+        pattern = _strftime_pattern(fmt, _DEFAULT_PATTERNS[kind])
         shown[col] = values.map(lambda v: "" if is_missing(v) else pd.Timestamp(v).strftime(pattern))
     else:
         return cfg
@@ -114,18 +122,21 @@ def _format_number(value, fmt) -> str:
     return f"{int(v)}" if v.is_integer() else f"{v:g}"
 
 
-# moment.js tokens used by DatetimeColumn formats -> strftime codes.
+# moment.js tokens used by date/time column formats -> strftime codes.
 _MOMENT_TOKENS = (("YYYY", "%Y"), ("MMM", "%b"), ("MM", "%m"), ("DD", "%d"), ("HH", "%H"), ("mm", "%M"), ("ss", "%S"))
+# Column type -> strftime pattern when the column has no simple format.
+_DEFAULT_PATTERNS = {"datetime": "%Y-%m-%d %H:%M", "date": "%Y-%m-%d", "time": "%H:%M"}
 
 
-def _strftime_pattern(moment_format) -> str:
-    """strftime pattern for a simple moment.js format; DATETIME_FORMAT's
-    pattern for anything else."""
-    pattern = moment_format or DATETIME_FORMAT
+def _strftime_pattern(moment_format, default: str) -> str:
+    """strftime pattern for a simple moment.js format, else default."""
+    if not moment_format:
+        return default
+    pattern = moment_format
     for token, code in _MOMENT_TOKENS:
         pattern = pattern.replace(token, code)
     if re.search(r"[A-Za-z]", re.sub(r"%[A-Za-z]", "", pattern)):
-        return "%Y-%m-%d %H:%M"
+        return default
     return pattern
 
 
