@@ -9,73 +9,9 @@ import json
 import pandas as pd
 import streamlit as st
 
+from components import nav
+from components.formatting import format_timestamp, issue_status
 from database import run_query
-
-
-# --- formatting helpers -----------------------------------------------------
-
-def format_timestamp(ts):
-    """Format a timestamp handling both datetime and string types."""
-    if ts is None:
-        return "N/A"
-    try:
-        return ts.strftime("%Y-%m-%d %H:%M")
-    except AttributeError:
-        return str(ts)[:16] if ts else "N/A"
-
-
-def format_relative_time(ts):
-    """Format a timestamp as relative time (e.g. '2h ago')."""
-    if ts is None:
-        return "N/A"
-    from datetime import datetime
-    try:
-        if isinstance(ts, str):
-            ts = datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S")
-        diff = datetime.now() - ts
-        seconds = diff.total_seconds()
-        if seconds < 60:
-            return "Just now"
-        if seconds < 3600:
-            return f"{int(seconds // 60)}m ago"
-        if seconds < 86400:
-            return f"{int(seconds // 3600)}h ago"
-        return f"{int(seconds // 86400)}d ago"
-    except Exception:
-        return format_timestamp(ts)
-
-
-def truncate(text, max_len: int = 50) -> str:
-    """Truncate text with an ellipsis."""
-    if not text:
-        return ""
-    return text[:max_len] + "..." if len(text) > max_len else text
-
-
-def format_duration(seconds) -> str:
-    """Format a duration in human-readable form."""
-    if not seconds or seconds <= 0:
-        return ""
-    seconds = int(seconds)
-    if seconds >= 3600:
-        hours, mins = seconds // 3600, (seconds % 3600) // 60
-        return f"{hours}h {mins}m" if mins else f"{hours}h"
-    if seconds >= 60:
-        mins, secs = seconds // 60, seconds % 60
-        return f"{mins}m {secs}s" if secs and mins < 10 else f"{mins}m"
-    return f"{seconds}s"
-
-
-def format_issue_status(status: str) -> str:
-    """Human label for a run/test status."""
-    status = (status or "").lower()
-    if status in ("fail", "error"):
-        return "Failing"
-    if status == "skipped":
-        return "Skipped"
-    if status == "warn":
-        return "Warn"
-    return status.title() if status else "Unknown"
 
 
 def _present(value) -> bool:
@@ -175,10 +111,7 @@ def render_model_error_card(object_name, message, unique_id, meta_line, key_pref
         else:
             st.caption("No error message captured for this run.")
         if unique_id and st.button("View model", key=f"{key_prefix}_view_{unique_id}"):
-            st.session_state["selected_model"] = unique_id
-            st.session_state["selected_test"] = None
-            st.session_state["selected_invocation"] = None
-            st.rerun()
+            nav.open_model(unique_id)
 
 
 # --- test cards -------------------------------------------------------------
@@ -258,7 +191,7 @@ def render_test_issue_card(row, key_prefix):
     # Keep the card open across the rerun that a button click triggers.
     with st.expander(title, expanded=show_rows):
         meta = " · ".join(p for p in [
-            format_issue_status(row.get("STATUS")),
+            issue_status(row.get("STATUS")),
             row.get("TEST_NAMESPACE") or "",
             (row.get("SEVERITY") or "").lower(),
             format_timestamp(row.get("DETECTED_AT")),
@@ -309,14 +242,11 @@ def render_test_issue_card(row, key_prefix):
                     else:
                         note = f"{len(res)} row(s)" + (" (showing first 500)" if len(res) > 500 else "")
                         st.caption(note)
-                        st.dataframe(res.head(500), use_container_width=True, hide_index=True)
+                        st.dataframe(res.head(500), width="stretch", hide_index=True)
                 except Exception as e:
                     st.error(f"Could not run query: {e}")
                 st.caption("Reconstructed query" if reconstructed else "Query captured by elementary")
                 st.code(query_sql, language="sql")
 
         if tuid and st.button("View test", key=f"{key_prefix}_view_{tuid}"):
-            st.session_state["selected_test"] = tuid
-            st.session_state["selected_model"] = None
-            st.session_state["selected_invocation"] = None
-            st.rerun()
+            nav.open_test(tuid)

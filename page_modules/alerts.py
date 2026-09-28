@@ -1,24 +1,20 @@
-"""Alerts page - Current and historical test and model failures."""
+"""Alerts page - current and historical test and model failures."""
 
 import pandas as pd
 import streamlit as st
+
+from components import nav, ui
+from components.charts import project_test_failures_chart
+from components.formatting import format_hours, status_label, to_datetime, truncate
 from services.alerts_service import (
-    get_current_test_failures,
-    get_current_model_failures,
     get_alert_counts,
-    get_historical_test_failures,
-    get_historical_model_failures,
+    get_current_model_failures,
+    get_current_test_failures,
     get_historical_alert_counts,
+    get_historical_model_failures,
+    get_historical_test_failures,
     get_project_test_status_history,
 )
-from components.charts import project_test_failures_chart
-
-
-def _truncate(text: str, max_len: int = 50) -> str:
-    """Truncate text with ellipsis."""
-    if not text:
-        return ""
-    return text[:max_len] + "..." if len(text) > max_len else text
 
 
 def _calculate_test_resolution_metrics(history_df: pd.DataFrame):
@@ -101,253 +97,136 @@ def _calculate_test_resolution_metrics(history_df: pd.DataFrame):
     return daily_df, episodes_df
 
 
-def _format_resolution_duration(hours: float) -> str:
-    """Format hours as compact duration."""
-    if hours is None or pd.isna(hours):
-        return "N/A"
-    if hours < 1:
-        return f"{hours * 60:.0f}m"
-    if hours < 24:
-        return f"{hours:.1f}h"
-    return f"{hours / 24:.1f}d"
+def render():
+    days = nav.days()
+    ui.page_header("Alerts", f"What is failing now, and every failure in the last {days} days.")
 
+    search = st.text_input("Search", placeholder="Model or test name", key="alerts_search")
 
-def render(search_filter: str = ""):
-    st.title("Alerts")
-
-    # Mode tabs
     tab_active, tab_history = st.tabs(["Active", "History"])
-
     with tab_active:
-        _render_active_alerts(search_filter)
-
+        _render_active(days, search)
     with tab_history:
-        _render_historical_alerts(search_filter)
+        _render_history(days, search)
 
 
-def _render_active_alerts(search_filter: str):
-    """Render currently active failures (latest run is failing)."""
-    st.caption("Tests and models where the most recent run failed")
+def _render_active(days: int, search: str):
+    """Tests and models whose most recent run in the range failed."""
+    st.caption("Tests and models where the most recent run failed.")
 
-    # Alert counts summary
-    counts = get_alert_counts(days=7)
+    counts = get_alert_counts(days=days)
     if counts.empty:
-        st.info("No data available")
+        ui.empty_state("No data available")
         return
 
     row = counts.iloc[0]
     failed_tests = int(row["FAILED_TESTS"] or 0)
     failed_models = int(row["FAILED_MODELS"] or 0)
-    total_failures = failed_tests + failed_models
-
-    if total_failures == 0:
-        st.success("No current failures - all tests and models are passing")
+    if failed_tests + failed_models == 0:
+        ui.empty_state("No current failures: all tests and models are passing", ok=True)
         return
 
-    # Summary metrics
-    metric_cols = st.columns(3)
-    with metric_cols[0]:
-        st.metric("Total Failures", total_failures)
-    with metric_cols[1]:
-        st.metric("Test Failures", failed_tests)
-    with metric_cols[2]:
-        st.metric("Model Failures", failed_models)
+    ui.metric_row([
+        ("Total failures", failed_tests + failed_models),
+        ("Test failures", failed_tests),
+        ("Model failures", failed_models),
+    ])
 
-    st.divider()
+    st.subheader("Failing tests")
+    _test_table(get_current_test_failures(days, search), key="active_tests_table", search=search)
 
-    # Side-by-side layout
-    test_col, model_col = st.columns(2)
-
-    with test_col:
-        st.subheader(f"Test Failures ({failed_tests})")
-        _render_test_failures(days=7, search_filter=search_filter)
-
-    with model_col:
-        st.subheader(f"Model Failures ({failed_models})")
-        _render_model_failures(days=7, search_filter=search_filter)
+    st.subheader("Failing models")
+    _model_table(get_current_model_failures(days, search), key="active_models_table", search=search)
 
 
-def _render_historical_alerts(search_filter: str):
-    """Render all failures in time period."""
-    # Filters
-    col1, _ = st.columns([1, 4])
-    with col1:
-        days = st.selectbox("Time range", [7, 14, 30], index=0, format_func=lambda x: f"{x}d", key="history_days")
-
-    st.caption(f"All failures in the last {days} days")
-
-    # Alert counts summary
+def _render_history(days: int, search: str):
+    """Every failure in the range, with the project-wide trend."""
     counts = get_historical_alert_counts(days)
     if counts.empty:
-        st.info("No data available")
+        ui.empty_state("No data available")
         return
 
     row = counts.iloc[0]
     failed_tests = int(row["FAILED_TESTS"] or 0)
     failed_models = int(row["FAILED_MODELS"] or 0)
-
-    test_history_df = get_project_test_status_history(days)
-    trend_df, episodes_df = _calculate_test_resolution_metrics(test_history_df)
-
     if failed_tests == 0 and failed_models == 0:
-        st.success("No failures in this time period")
+        ui.empty_state("No failures in this time range", ok=True)
         return
 
-    # Summary metrics
-    metric_cols = st.columns(2)
-    with metric_cols[0]:
-        st.metric("Test Failures", failed_tests)
-    with metric_cols[1]:
-        st.metric("Model Failures", failed_models)
-
+    metrics = [("Test failures", failed_tests), ("Model failures", failed_models)]
+    test_history_df = get_project_test_status_history(days)
+    trend_df, episodes_df = _calculate_test_resolution_metrics(test_history_df)
     if not test_history_df.empty:
         current_history_df = test_history_df[test_history_df["IS_CURRENT"]]
-        latest_status_df = (
-            current_history_df.sort_values("DETECTED_AT")
-            .groupby("TEST_UNIQUE_ID")
-            .tail(1)
-        )
+        latest_status_df = current_history_df.sort_values("DETECTED_AT").groupby("TEST_UNIQUE_ID").tail(1)
         open_failures = int(latest_status_df["STATUS"].isin(["fail", "error"]).sum())
         median_resolution = episodes_df["RESOLUTION_HOURS"].median() if not episodes_df.empty else None
         p75_resolution = episodes_df["RESOLUTION_HOURS"].quantile(0.75) if not episodes_df.empty else None
+        metrics += [
+            ("Open test failures", open_failures),
+            ("Median resolution", format_hours(median_resolution)),
+            ("P75 resolution", format_hours(p75_resolution)),
+        ]
+    ui.metric_row(metrics)
 
-        st.divider()
-        trend_cols = st.columns(3)
-        with trend_cols[0]:
-            st.metric("Open Test Failures", open_failures)
-        with trend_cols[1]:
-            st.metric("Median Resolution", _format_resolution_duration(median_resolution))
-        with trend_cols[2]:
-            st.metric("P75 Resolution", _format_resolution_duration(p75_resolution))
-
-        st.subheader("Project Test Failure Trend")
+    if not test_history_df.empty:
+        st.subheader("Test failure trend")
         st.caption("Daily failed test runs, distinct failing tests, and fail-to-pass resolutions.")
-        st.altair_chart(project_test_failures_chart(trend_df), use_container_width=True)
+        st.altair_chart(project_test_failures_chart(trend_df))
 
-    st.divider()
+    st.subheader("Test failures")
+    _test_table(get_historical_test_failures(days, search), key="history_tests_table", search=search, limit_note=True)
 
-    # Side-by-side layout
-    test_col, model_col = st.columns(2)
-
-    with test_col:
-        st.subheader("Test Failures")
-        _render_historical_test_failures(days, search_filter)
-
-    with model_col:
-        st.subheader("Model Failures")
-        _render_historical_model_failures(days, search_filter)
+    st.subheader("Model failures")
+    _model_table(get_historical_model_failures(days, search), key="history_models_table", search=search, limit_note=True)
 
 
-def _render_test_failures(days: int, search_filter: str):
-    """Render current test failures with click navigation."""
-    df = get_current_test_failures(days, search_filter)
-
+def _test_table(df: pd.DataFrame, *, key: str, search: str, limit_note: bool = False):
     if df.empty:
-        st.info("No test failures")
+        ui.empty_state("No test failures match the search" if search else "No test failures", ok=not search)
         return
+    if limit_note and len(df) >= 200:
+        st.caption("Showing the 200 most recent.")
+    df = to_datetime(df.copy(), "DETECTED_AT")
+    df["STATUS_LABEL"] = df["STATUS"].map(status_label)
+    selected = ui.table(
+        df,
+        key=key,
+        noun="test failures",
+        columns={
+            "STATUS_LABEL": "Status",
+            "TABLE_NAME": "Model",
+            "SHORT_NAME": st.column_config.TextColumn("Test", width="large"),
+            "TEST_NAMESPACE": "Type",
+            "SCHEMA_NAME": "Schema",
+            "DETECTED_AT": ui.datetime_column("Detected"),
+        },
+    )
+    if selected is not None:
+        nav.open_test(selected["TEST_UNIQUE_ID"])
 
-    for _, row in df.iterrows():
-        short_name = row.get("SHORT_NAME") or row["TEST_NAME"]
-        name = _truncate(short_name)
-        model = row["TABLE_NAME"] or "N/A"
-        test_ns = row.get("TEST_NAMESPACE") or row["TEST_TYPE"] or ""
 
-        with st.container(border=True):
-            cols = st.columns([4, 1])
-            with cols[0]:
-                st.markdown(f"🔴 **{model}**")
-                st.caption(f"{name} | {test_ns}" if test_ns else name)
-                st.caption(f"{row['SCHEMA_NAME']} | {str(row['DETECTED_AT'])[:16]}")
-            with cols[1]:
-                if st.button("View", key=f"alert_test_{row['TEST_UNIQUE_ID']}"):
-                    st.session_state["selected_test"] = row["TEST_UNIQUE_ID"]
-                    st.session_state["selected_model"] = None
-                    st.rerun()
-
-
-def _render_model_failures(days: int, search_filter: str):
-    """Render current model failures with click navigation."""
-    df = get_current_model_failures(days, search_filter)
-
+def _model_table(df: pd.DataFrame, *, key: str, search: str, limit_note: bool = False):
     if df.empty:
-        st.info("No model failures")
+        ui.empty_state("No model failures match the search" if search else "No model failures", ok=not search)
         return
-
-    for _, row in df.iterrows():
-        name = _truncate(row["NAME"])
-        schema = row["SCHEMA_NAME"] or "unknown"
-
-        with st.container(border=True):
-            cols = st.columns([4, 1])
-            with cols[0]:
-                st.markdown(f"🔴 **{name}**")
-                st.caption(f"{schema} | {row['STATUS']}")
-                if row["EXECUTION_TIME"]:
-                    st.caption(f"{row['EXECUTION_TIME']:.1f}s | {str(row['GENERATED_AT'])[:16]}")
-                else:
-                    st.caption(str(row["GENERATED_AT"])[:16])
-            with cols[1]:
-                if st.button("View", key=f"alert_model_{row['UNIQUE_ID']}"):
-                    st.session_state["selected_model"] = row["UNIQUE_ID"]
-                    st.session_state["selected_test"] = None
-                    st.rerun()
-
-
-def _render_historical_test_failures(days: int, search_filter: str):
-    """Render historical test failures."""
-    df = get_historical_test_failures(days, search_filter)
-
-    if df.empty:
-        st.info("No test failures")
-        return
-
-    with st.container(height=400):
-        for _, row in df.iterrows():
-            short_name = row.get("SHORT_NAME") or row["TEST_NAME"]
-            name = _truncate(short_name)
-            model = row["TABLE_NAME"] or "N/A"
-            status = row["STATUS"].lower()
-
-            # Yellow for warn, red for fail/error
-            if status == "warn":
-                icon = "🟡"
-            else:
-                icon = "🔴"
-
-            with st.container(border=True):
-                cols = st.columns([4, 1])
-                with cols[0]:
-                    st.markdown(f"{icon} **{model}**")
-                    st.caption(f"{name}")
-                    st.caption(f"{status.upper()} | {str(row['DETECTED_AT'])[:16]}")
-                with cols[1]:
-                    if st.button("View", key=f"hist_test_{row['TEST_UNIQUE_ID']}_{row['DETECTED_AT']}"):
-                        st.session_state["selected_test"] = row["TEST_UNIQUE_ID"]
-                        st.session_state["selected_model"] = None
-                        st.rerun()
-
-
-def _render_historical_model_failures(days: int, search_filter: str):
-    """Render historical model failures."""
-    df = get_historical_model_failures(days, search_filter)
-
-    if df.empty:
-        st.info("No model failures")
-        return
-
-    with st.container(height=400):
-        for _, row in df.iterrows():
-            name = _truncate(row["NAME"])
-            schema = row["SCHEMA_NAME"] or "unknown"
-
-            with st.container(border=True):
-                cols = st.columns([4, 1])
-                with cols[0]:
-                    st.markdown(f"🔴 **{name}**")
-                    st.caption(f"{schema} | {row['STATUS']}")
-                    st.caption(str(row["GENERATED_AT"])[:16])
-                with cols[1]:
-                    if st.button("View", key=f"hist_model_{row['UNIQUE_ID']}_{row['GENERATED_AT']}"):
-                        st.session_state["selected_model"] = row["UNIQUE_ID"]
-                        st.session_state["selected_test"] = None
-                        st.rerun()
+    if limit_note and len(df) >= 200:
+        st.caption("Showing the 200 most recent.")
+    df = to_datetime(df.copy(), "GENERATED_AT")
+    df["STATUS_LABEL"] = df["STATUS"].map(status_label)
+    df["MESSAGE_SHORT"] = df["MESSAGE"].map(lambda m: truncate(" ".join(str(m).split()), 200) if pd.notna(m) else "")
+    selected = ui.table(
+        df,
+        key=key,
+        noun="model failures",
+        columns={
+            "STATUS_LABEL": "Status",
+            "NAME": "Model",
+            "SCHEMA_NAME": "Schema",
+            "EXECUTION_TIME": ui.seconds_column("Duration"),
+            "GENERATED_AT": ui.datetime_column("Run at"),
+            "MESSAGE_SHORT": st.column_config.TextColumn("Error", width="large"),
+        },
+    )
+    if selected is not None:
+        nav.open_model(selected["UNIQUE_ID"])
