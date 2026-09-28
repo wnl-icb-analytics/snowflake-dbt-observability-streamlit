@@ -104,9 +104,9 @@ def _render_banner(failing_nodes, failing_tests, warnings, stale, drops):
 # --- open issue sections ------------------------------------------------------
 
 def _render_failing(failing_nodes: pd.DataFrame, failing_tests: pd.DataFrame, days: int):
-    st.subheader("Failing")
+    st.subheader(f"Failing ({len(failing_nodes) + len(failing_tests):,})")
     st.caption(
-        "Models, seeds, snapshots and tests whose latest result that was not skipped is fail or error, "
+        "Models, seeds, snapshots and tests whose latest non-skipped result is fail or error, "
         "across all runs. A later skip does not clear a failure. "
         "Broke = the first failing run of the current streak."
     )
@@ -193,7 +193,7 @@ def _render_warnings(warn_nodes: pd.DataFrame, warn_tests: pd.DataFrame):
     total = len(warn_nodes) + len(warn_tests)
     st.subheader(f"Warnings ({total:,})")
     st.caption(
-        "Tests whose latest result that was not skipped is warn: the check found rows, but its severity "
+        "Tests whose latest non-skipped result is warn: the check found rows, but its severity "
         "is warn so the build carried on. Models appear here when they built with warnings. "
         "Since = first warn after the last pass."
     )
@@ -416,9 +416,9 @@ def render():
     last_run_time = last_run.iloc[0]["LAST_RUN_TIME"] if not last_run.empty else None
 
     ui.metric_row([
-        ("Failing models", len(failing_nodes), {"help": "Models, seeds and snapshots whose latest result that was not skipped is an error"}),
-        ("Failing tests", len(failing_tests), {"help": "Tests whose latest result that was not skipped is fail or error"}),
-        ("Warnings", warnings, {"help": "Tests (and models) whose latest result that was not skipped is warn"}),
+        ("Failing models", len(failing_nodes), {"help": "Models, seeds and snapshots whose latest non-skipped result is an error"}),
+        ("Failing tests", len(failing_tests), {"help": "Tests whose latest non-skipped result is fail or error"}),
+        ("Warnings", warnings, {"help": "Tests (and models) whose latest non-skipped result is warn"}),
         ("Skipped", len(skipped_nodes) + len(skipped_tests), {"help": "Latest result skipped; the last real result passed"}),
         (f"Runtime ({days}d)", format_duration(total_exec_time) or "N/A"),
         ("Last run", format_relative_time(last_run_time), {"help": f"Latest result: {format_timestamp(last_run_time)}"}),

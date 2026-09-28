@@ -1,9 +1,10 @@
 """Open-issue signals for Home: failing, warning and skipped nodes and tests,
 stale outputs and row-count drops.
 
-"Open" means the latest result of a node or test in the current manifest,
-over all history. Every query takes as_of (a UTC timestamp string) to replay
-a past moment; None means now. Times returned are UTC.
+Issues are read from the latest results of the nodes and tests in the current
+manifest, over all history (not the sidebar range). Every query takes as_of (a
+UTC timestamp string) to replay a past moment; None means now. Times returned
+are UTC.
 """
 
 from config import (
