@@ -18,6 +18,30 @@ DEFAULT_LOOKBACK_DAYS = 7
 # Cache TTL (seconds) - mainly for UI rerender efficiency
 CACHE_TTL = 300
 
+# dbt runs in GitHub Actions in this repo; used for run, commit and issue links.
+DBT_REPO_URL = "https://github.com/wnl-icb-analytics/dbt-analytics"
+
+# Scheduled dbt jobs. Mirrors the cron schedules in dbt-analytics
+# .github/workflows/dbt-scheduled.yml: keep the two in step. Times are UTC.
+# weekdays: Monday=0 ... Sunday=6 (None = every day). days: day of month
+# (None = any). skip_days: days of month the workflow skips.
+# The dev monthly full refresh is omitted: Elementary does not record dev runs.
+JOB_SCHEDULES = {
+    "daily": {"cron": "0 4 * * 0,2-6", "label": "Tue-Sun 04:00", "hours": (4,), "weekdays": (1, 2, 3, 4, 5, 6)},
+    "weekly": {"cron": "0 4 * * 1", "label": "Mon 04:00, not the 1st", "hours": (4,), "weekdays": (0,), "skip_days": (1,)},
+    "monthly-full-refresh": {"cron": "0 4 1 * *", "label": "1st 04:00", "hours": (4,), "days": (1,)},
+    "sdl-intraday": {"cron": "0 7,12 * * *", "label": "Daily 07:00, 12:00", "hours": (7, 12)},
+}
+# GitHub starts scheduled runs hours after the cron time and Elementary records
+# a run when it finishes: in the 30 days to 2026-09-28 runs were recorded
+# 2.8-8.5h after their slot (04:00 jobs: 4.8-7.6h). A slot with no run counts
+# as missing once this many hours have passed.
+JOB_GRACE_HOURS = 9
+# A scheduled run fills the earliest empty slot of its job in the preceding
+# 16 hours. Kept under the 19h gap between sdl-intraday's 12:00 and next 07:00
+# slots so a late run never fills the previous day's slot.
+JOB_SLOT_WINDOW_HOURS = 16
+
 # Thresholds
 FLAKY_TEST_THRESHOLD = 0.2  # 20% failure rate = flaky
 SLOW_MODEL_PERCENTILE = 90  # Top 10% by execution time = slow

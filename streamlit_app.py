@@ -13,6 +13,7 @@ from page_modules import (
     alerts,
     growth,
     home,
+    jobs,
     model_detail,
     models,
     performance,
@@ -44,6 +45,7 @@ PAGES = {
     "Monitoring": [
         page(alerts.render, "Alerts", ":material/notifications:"),
         page(sources.render, "Sources", ":material/database:"),
+        page(jobs.render, "Jobs", ":material/schedule:"),
         page(runs.render, "Runs", ":material/history:"),
     ],
     "Project": [
