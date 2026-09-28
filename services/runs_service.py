@@ -2,10 +2,12 @@
 
 from database import run_query
 from config import ELEMENTARY_SCHEMA, DEFAULT_LOOKBACK_DAYS
+from services.jobs_service import hide_compile_show_sql, job_columns_sql
 
 
-def get_invocations(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 1000):
-    """Get dbt invocations in the range with model and test status counts."""
+def get_invocations(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 1000, include_compile_show: bool = False):
+    """Get dbt invocations in the range with job, trigger and model and test
+    status counts. Local compile and show invocations only when asked."""
     query = f"""
     WITH run_stats AS (
         SELECT
@@ -37,6 +39,7 @@ def get_invocations(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 1000):
         i.target_name,
         i.dbt_user,
         i.selected,
+        {job_columns_sql()},
         TRY_PARSE_JSON(i.target_adapter_specific_fields):warehouse::VARCHAR as warehouse,
         COALESCE(s.total_models, 0) as models_run,
         COALESCE(s.success_count, 0) as success_count,
@@ -51,6 +54,7 @@ def get_invocations(days: int = DEFAULT_LOOKBACK_DAYS, limit: int = 1000):
     LEFT JOIN run_stats s ON i.invocation_id = s.invocation_id
     LEFT JOIN test_stats t ON i.invocation_id = t.invocation_id
     WHERE i.created_at >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
+    {"" if include_compile_show else "AND " + hide_compile_show_sql()}
     ORDER BY i.created_at DESC
     LIMIT {limit}
     """

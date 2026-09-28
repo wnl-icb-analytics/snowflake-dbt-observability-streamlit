@@ -12,7 +12,7 @@ from components.formatting import (
     truncate,
 )
 from components.issue_cards import render_model_error_card, render_test_issue_card
-from page_modules.runs import runs_table
+from page_modules.runs import compile_show_control, runs_table
 from services.alerts_service import (
     get_current_issue_summary,
     get_downstream_model_counts,
@@ -184,7 +184,8 @@ def _render_latest_build():
 
 def _render_recent_runs():
     st.subheader("Recent runs")
-    runs = get_recent_runs(limit=8)
+    include = compile_show_control(key="home_runs_compile_show")
+    runs = get_recent_runs(limit=8, include_compile_show=include)
     if runs.empty:
         ui.empty_state("No recent runs")
         return
