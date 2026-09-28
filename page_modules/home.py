@@ -19,7 +19,6 @@ from components.formatting import (
     is_missing,
     issue_status,
     to_datetime,
-    trigger_label,
     truncate,
 )
 from components.issue_cards import render_model_error_card, render_test_issue_card, where_it_broke
@@ -44,6 +43,7 @@ from services.health_service import (
     get_stale_outputs,
     get_test_issues,
 )
+from services.jobs_service import job_label
 from services.metrics_service import (
     get_last_run_time,
     get_project_totals,
@@ -219,11 +219,11 @@ def _render_warnings(warn_nodes: pd.DataFrame, warn_tests: pd.DataFrame):
 def _render_stale(stale: pd.DataFrame):
     st.subheader(f"Stale outputs ({len(stale):,})")
     st.caption(
-        f"Tables, incremental models, snapshots and seeds whose last successful build is older than "
+        f"Tables, incremental models and snapshots whose last successful build is older than "
         f"{STALE_GAP_MULTIPLIER}x their typical gap between scheduled builds, and at least "
         f"{STALE_MIN_AGE_HOURS}h old. Typical gap = median gap between days with a scheduled build in the "
         f"{STALE_LOOKBACK_DAYS} days before the last success; needs {STALE_MIN_BUILDS} such days. "
-        "Views are not checked."
+        "Views and seeds are not checked."
     )
     if stale.empty:
         ui.empty_state("No stale outputs", ok=True)
@@ -260,7 +260,7 @@ def _render_drops(drops: pd.DataFrame):
         ui.empty_state("No row-count drops", ok=True)
         return
     df = to_datetime(drops.copy(), "RUN_STARTED_AT")
-    df["TRIGGER"] = df["CAUSE_CATEGORY"].map(trigger_label)
+    df["JOB"] = df["JOB_TYPE"].map(job_label)
     selected = ui.table(
         df,
         key="home_drops_table",
@@ -271,7 +271,7 @@ def _render_drops(drops: pd.DataFrame):
             "ROW_COUNT": st.column_config.NumberColumn("Rows", format="localized"),
             "CHANGE_PCT": st.column_config.NumberColumn("Change", format="%+.1f%%"),
             "RUN_STARTED_AT": ui.datetime_column("Run started"),
-            "TRIGGER": "Trigger",
+            "JOB": "Job",
         },
     )
     if selected is not None:

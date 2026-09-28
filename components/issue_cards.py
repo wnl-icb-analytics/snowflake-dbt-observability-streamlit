@@ -10,9 +10,9 @@ import pandas as pd
 import streamlit as st
 
 from components import nav
-from components.formatting import format_timestamp, format_when, is_missing, issue_status, trigger_label
-from config import DBT_REPO_URL
+from components.formatting import format_timestamp, format_when, is_missing, issue_status
 from database import run_query
+from services.jobs_service import commit_url, job_label
 
 
 def _present(value) -> bool:
@@ -67,17 +67,18 @@ def parse_model_error(message: str) -> dict:
 
 def where_it_broke(row) -> str | None:
     """Markdown line for the first failing run of an open streak: local time,
-    trigger, commit link and GitHub run link. Reads the STREAK_* and invocation
-    columns of the health service queries; None when there is no streak."""
+    job (Deploy for a push to main, Daily build, Manual, Local, ...), commit
+    link and GitHub run link. Reads the STREAK_* and job columns of the health
+    service queries; None when there is no streak."""
     when = row.get("STREAK_RUN_STARTED_AT")
     if is_missing(when):
         when = row.get("STREAK_STARTED_AT")
     if is_missing(when):
         return None
-    parts = [f"Broke {format_when(when)}", trigger_label(row.get("CAUSE_CATEGORY"))]
+    parts = [f"Broke {format_when(when)}", job_label(row.get("JOB_TYPE") if _present(row.get("JOB_TYPE")) else "local")]
     sha = row.get("GIT_SHA")
     if _present(sha):
-        parts.append(f"commit [{str(sha)[:7]}]({DBT_REPO_URL}/commit/{sha})")
+        parts.append(f"commit [{str(sha)[:7]}]({commit_url(sha)})")
     run_url = row.get("JOB_RUN_URL")
     if _present(run_url):
         parts.append(f"[GitHub run]({run_url})")

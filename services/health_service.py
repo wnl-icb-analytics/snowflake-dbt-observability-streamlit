@@ -17,6 +17,7 @@ from config import (
     STALE_MIN_BUILDS,
 )
 from database import run_query
+from services.jobs_service import job_columns_sql, trigger_sql
 
 # Resource types dbt builds as relations and reports in dbt_run_results.
 BUILT_TYPES = "('model', 'seed', 'snapshot')"
@@ -128,9 +129,9 @@ def get_node_issues(days: int = DEFAULT_LOOKBACK_DAYS, as_of: str | None = None)
         s.result_at AS streak_started_at,
         s.invocation_id AS streak_invocation_id,
         i.run_started_at AS streak_run_started_at,
-        i.cause_category,
-        i.git_sha,
-        i.job_run_url
+        {job_columns_sql('i')},
+        NULLIF(i.git_sha, '') AS git_sha,
+        NULLIF(i.job_run_url, '') AS job_run_url
     FROM open_nodes o
     JOIN nodes n ON n.unique_id = o.unique_id
     JOIN agg a ON a.unique_id = o.unique_id
@@ -238,9 +239,9 @@ def get_test_issues(days: int = DEFAULT_LOOKBACK_DAYS, as_of: str | None = None)
         s.detected_at AS streak_started_at,
         s.invocation_id AS streak_invocation_id,
         i.run_started_at AS streak_run_started_at,
-        i.cause_category,
-        i.git_sha,
-        i.job_run_url
+        {job_columns_sql('i')},
+        NULLIF(i.git_sha, '') AS git_sha,
+        NULLIF(i.job_run_url, '') AS job_run_url
     FROM open_tests o
     JOIN {ELEMENTARY_SCHEMA}.elementary_test_results d
       ON d.test_unique_id = o.test_unique_id AND d.invocation_id = o.detail_invocation_id
@@ -259,17 +260,18 @@ def get_test_issues(days: int = DEFAULT_LOOKBACK_DAYS, as_of: str | None = None)
 
 
 def get_stale_outputs(as_of: str | None = None):
-    """Tables, incremental models, snapshots and seeds whose last successful
-    build is overdue against their own scheduled cadence (thresholds in
-    config: STALE_*). Views, ephemeral and semantic views are excluded, and so
-    are elementary's own models (written by run hooks, not builds)."""
+    """Tables, incremental models and snapshots whose last successful build is
+    overdue against their own scheduled cadence (thresholds in config:
+    STALE_*). Excluded: views, ephemeral models and semantic views (no stored
+    data), seeds (CSV files that change only on deploy) and elementary's own
+    models (written by run hooks, not builds)."""
     query = f"""
     WITH {_CLOCK},
     {_NODES},
     outputs AS (
         SELECT *
         FROM nodes
-        WHERE materialization IN ('table', 'incremental', 'snapshot', 'seed')
+        WHERE materialization IN ('table', 'incremental', 'snapshot')
           AND COALESCE(package_name, '') <> 'elementary'
     ),
     builds AS (
@@ -278,7 +280,7 @@ def get_stale_outputs(as_of: str | None = None):
             r.unique_id,
             r.invocation_id,
             TRY_TO_TIMESTAMP_NTZ(r.generated_at) AS built_at,
-            i.cause_category IN ('schedule', 'workflow_dispatch') AS is_scheduled
+            {trigger_sql('i')} IN ('schedule', 'manual') AS is_scheduled
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
         JOIN outputs o ON o.unique_id = r.unique_id
         LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_invocations i ON i.invocation_id = r.invocation_id
@@ -368,9 +370,9 @@ def get_row_count_drops(as_of: str | None = None):
         r.previous_row_count,
         r.row_count,
         (r.row_count - r.previous_row_count) / r.previous_row_count * 100 AS change_pct,
-        i.cause_category,
-        i.git_sha,
-        i.job_run_url
+        {job_columns_sql('i')},
+        NULLIF(i.git_sha, '') AS git_sha,
+        NULLIF(i.job_run_url, '') AS job_run_url
     FROM ranked r
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_invocations i ON i.invocation_id = r.invocation_id
     WHERE r.rn = 1

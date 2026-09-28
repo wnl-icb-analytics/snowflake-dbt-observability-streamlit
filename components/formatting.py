@@ -170,19 +170,6 @@ def status_label(status, dot: bool = True) -> str:
     return label if dot else label.split(" ", 1)[1]
 
 
-# dbt_invocations.cause_category -> what started the run.
-_TRIGGERS = {"schedule": "Schedule", "push": "Deploy", "workflow_dispatch": "Manual"}
-
-
-def trigger_label(cause_category) -> str:
-    """What started an invocation: Schedule, Deploy (push to main), Manual
-    (workflow_dispatch) or Local (no CI cause recorded)."""
-    if is_missing(cause_category) or not str(cause_category).strip():
-        return "Local"
-    key = str(cause_category).lower()
-    return _TRIGGERS.get(key, key.replace("_", " ").title())
-
-
 def run_status_label(row) -> str:
     """Overall status of an invocation: failed if any model or test failed,
     warnings if only test warnings, skipped if nothing succeeded, else passed."""

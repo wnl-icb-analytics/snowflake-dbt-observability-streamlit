@@ -78,12 +78,13 @@ SLOWDOWN_RUN_MIN_FLAGGED = 10
 RUN_SHARE_TOP_N = 25
 
 # Health signals on Home
-# Stale output: a table, incremental model, snapshot or seed whose last successful
+# Stale output: a table, incremental model or snapshot whose last successful
 # build is older than STALE_GAP_MULTIPLIER x its typical gap between scheduled
 # builds, and at least STALE_MIN_AGE_HOURS old. Typical gap = median gap between
-# the distinct days with a scheduled (or manually dispatched) build in the
-# STALE_LOOKBACK_DAYS before the last success. CI and local builds count as a
-# refresh but not towards the cadence, so build-on-change models are not flagged.
+# the distinct days with a GitHub scheduled or manually dispatched build in the
+# STALE_LOOKBACK_DAYS before the last success. Deploy, local and pre-2026-08-07
+# Snowflake task builds count as a refresh but not towards the cadence, so
+# build-on-change models and the old schedule do not set it.
 STALE_GAP_MULTIPLIER = 2  # twice the usual gap = at least one scheduled build missed
 STALE_MIN_AGE_HOURS = 72  # daily builds skip Mondays, so 48h would flag them on Tuesday mornings
 STALE_LOOKBACK_DAYS = 60  # cadence window; long enough to cover weekly builds
