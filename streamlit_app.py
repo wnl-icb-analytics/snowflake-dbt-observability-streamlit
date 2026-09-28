@@ -18,6 +18,7 @@ from page_modules import (
     performance,
     run_detail,
     runs,
+    sources,
     test_detail,
     tests,
 )
@@ -42,6 +43,7 @@ PAGES = {
     ],
     "Monitoring": [
         page(alerts.render, "Alerts", ":material/notifications:"),
+        page(sources.render, "Sources", ":material/database:"),
         page(runs.render, "Runs", ":material/history:"),
     ],
     "Project": [
