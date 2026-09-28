@@ -85,23 +85,29 @@ def get_model_runtimes(days: int = DEFAULT_LOOKBACK_DAYS):
 
 def get_slowdowns(days: int = DEFAULT_LOOKBACK_DAYS):
     """Models whose latest successful run (in the last `days`) took at least
-    SLOWDOWN_RATIO x the median of their successful runs in the
-    SLOWDOWN_BASELINE_DAYS before it, and at least SLOWDOWN_MIN_EXTRA_SECONDS
-    longer. Needs SLOWDOWN_MIN_PRIOR_RUNS prior runs."""
+    SLOWDOWN_RATIO x the median of their prior successful runs from the same
+    job, and at least SLOWDOWN_MIN_EXTRA_SECONDS longer. A job is the
+    invocation's command + selector; prior runs come from the
+    SLOWDOWN_BASELINE_DAYS before the latest run and there must be at least
+    SLOWDOWN_MIN_PRIOR_RUNS of them (no fallback to other jobs).
+    RUN_MODELS is the number of successful models in the latest run."""
     query = f"""
     WITH runs AS (
         SELECT
-            unique_id,
-            name,
-            invocation_id,
-            execution_time,
-            generated_at,
-            TRY_TO_TIMESTAMP(generated_at) as ran_at,
-            ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY generated_at DESC) as rn
-        FROM {ELEMENTARY_SCHEMA}.dbt_run_results
-        WHERE resource_type = 'model'
-        AND status = 'success'
-        AND generated_at >= DATEADD(day, -{days + SLOWDOWN_BASELINE_DAYS}, CURRENT_TIMESTAMP())
+            r.unique_id,
+            r.name,
+            r.invocation_id,
+            r.execution_time,
+            r.generated_at,
+            TRY_TO_TIMESTAMP(r.generated_at) as ran_at,
+            COALESCE(i.command, '') as command,
+            COALESCE(i.selected, '') as selected,
+            ROW_NUMBER() OVER (PARTITION BY r.unique_id ORDER BY r.generated_at DESC) as rn
+        FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
+        JOIN {ELEMENTARY_SCHEMA}.dbt_invocations i ON i.invocation_id = r.invocation_id
+        WHERE r.resource_type = 'model'
+        AND r.status = 'success'
+        AND r.generated_at >= DATEADD(day, -{days + SLOWDOWN_BASELINE_DAYS}, CURRENT_TIMESTAMP())
     ),
     latest AS (
         SELECT * FROM runs
@@ -110,27 +116,46 @@ def get_slowdowns(days: int = DEFAULT_LOOKBACK_DAYS):
     baseline AS (
         SELECT r.unique_id, MEDIAN(r.execution_time) as median_time, COUNT(*) as prior_runs
         FROM runs r
-        JOIN latest l ON l.unique_id = r.unique_id
+        JOIN latest l
+            ON l.unique_id = r.unique_id
+            AND l.command = r.command
+            AND l.selected = r.selected
         WHERE r.rn > 1 AND r.ran_at >= DATEADD(day, -{SLOWDOWN_BASELINE_DAYS}, l.ran_at)
         GROUP BY r.unique_id
+    ),
+    flagged AS (
+        SELECT l.*, b.median_time, b.prior_runs
+        FROM latest l
+        JOIN baseline b ON b.unique_id = l.unique_id
+        WHERE b.prior_runs >= {SLOWDOWN_MIN_PRIOR_RUNS}
+        AND l.execution_time >= {SLOWDOWN_RATIO} * b.median_time
+        AND l.execution_time - b.median_time >= {SLOWDOWN_MIN_EXTRA_SECONDS}
+    ),
+    run_size AS (
+        SELECT invocation_id, COUNT(*) as run_models
+        FROM {ELEMENTARY_SCHEMA}.dbt_run_results
+        WHERE resource_type = 'model'
+        AND status = 'success'
+        AND invocation_id IN (SELECT invocation_id FROM flagged)
+        GROUP BY invocation_id
     )
     SELECT
-        l.unique_id,
-        l.name,
+        f.unique_id,
+        f.name,
         m.schema_name,
-        l.invocation_id,
-        l.generated_at,
-        l.execution_time as latest_time,
-        b.median_time,
-        l.execution_time / NULLIF(b.median_time, 0) as ratio,
-        l.execution_time - b.median_time as extra_time,
-        b.prior_runs
-    FROM latest l
-    JOIN baseline b ON b.unique_id = l.unique_id
-    LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON m.unique_id = l.unique_id
-    WHERE b.prior_runs >= {SLOWDOWN_MIN_PRIOR_RUNS}
-    AND l.execution_time >= {SLOWDOWN_RATIO} * b.median_time
-    AND l.execution_time - b.median_time >= {SLOWDOWN_MIN_EXTRA_SECONDS}
+        f.invocation_id,
+        f.generated_at,
+        f.command,
+        f.selected,
+        s.run_models,
+        f.execution_time as latest_time,
+        f.median_time,
+        f.execution_time / NULLIF(f.median_time, 0) as ratio,
+        f.execution_time - f.median_time as extra_time,
+        f.prior_runs
+    FROM flagged f
+    JOIN run_size s ON s.invocation_id = f.invocation_id
+    LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON m.unique_id = f.unique_id
     ORDER BY extra_time DESC
     """
     return run_query(query)
