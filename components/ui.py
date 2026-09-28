@@ -1,8 +1,13 @@
 """Layout helpers so every page shares the same header, metrics, tables and
 empty states."""
 
+import numbers
+import re
+
 import pandas as pd
 import streamlit as st
+
+from components.formatting import is_missing
 
 DATETIME_FORMAT = "YYYY-MM-DD HH:mm"
 
@@ -41,8 +46,8 @@ def contains(df: pd.DataFrame, columns, term: str) -> pd.DataFrame:
 
 def table(df: pd.DataFrame, *, key: str, columns: dict, height="auto", noun: str | None = None):
     """Single-row-selectable table. columns maps source column -> column_config
-    (or a label string); only these columns are shown, in this order.
-    Returns the selected row (Series) or None."""
+    (or a label string); only these columns are shown, in this order. Missing
+    values show as blank cells. Returns the selected row (Series) or None."""
     if noun:
         st.caption(f"{len(df):,} {noun} · select a row to open it")
     config = {
@@ -51,10 +56,7 @@ def table(df: pd.DataFrame, *, key: str, columns: dict, height="auto", noun: str
     }
     shown = df.reset_index(drop=True)
     for col in columns:
-        values = shown[col]
-        # Blank out missing text (the grid renders it as "None").
-        if values.dtype == object and values.dropna().map(lambda v: isinstance(v, str)).all():
-            shown[col] = values.fillna("")
+        config[col] = _blank_missing(shown, col, config[col])
     event = st.dataframe(
         shown,
         key=key,
@@ -68,6 +70,63 @@ def table(df: pd.DataFrame, *, key: str, columns: dict, height="auto", noun: str
     )
     rows = event.selection.rows
     return df.iloc[rows[0]] if rows else None
+
+
+def _blank_missing(shown: pd.DataFrame, col: str, cfg: dict) -> dict:
+    """Show missing values as blank cells; the grid renders them as "None".
+    Number and datetime columns with gaps are formatted to text in place (they
+    then sort as text); returns the column config to use."""
+    values = shown[col]
+    if not values.isna().any():
+        return cfg
+    type_config = cfg.get("type_config") or {}
+    kind, fmt = type_config.get("type"), type_config.get("format")
+    if kind == "text":
+        shown[col] = values.map(lambda v: "" if is_missing(v) else _format_number(v, None) if _is_number(v) else str(v))
+        return cfg
+    if kind == "number":
+        shown[col] = values.map(lambda v: "" if is_missing(v) else _format_number(v, fmt))
+    elif kind == "datetime":
+        pattern = _strftime_pattern(fmt)
+        shown[col] = values.map(lambda v: "" if is_missing(v) else pd.Timestamp(v).strftime(pattern))
+    else:
+        return cfg
+    return st.column_config.TextColumn(cfg.get("label"), help=cfg.get("help"), width=cfg.get("width"), pinned=cfg.get("pinned"))
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, numbers.Number) and not isinstance(value, bool)
+
+
+def _format_number(value, fmt) -> str:
+    """Text for a number as NumberColumn would show it: localized, percent or
+    a printf-style format such as '%.1f s'."""
+    v = float(value)
+    if fmt == "localized":
+        return f"{int(v):,}" if v.is_integer() else f"{v:,.2f}"
+    if fmt == "percent":
+        return f"{v * 100:.1f}%"
+    if fmt and "%" in fmt:
+        try:
+            return fmt % v
+        except (TypeError, ValueError):
+            pass
+    return f"{int(v)}" if v.is_integer() else f"{v:g}"
+
+
+# moment.js tokens used by DatetimeColumn formats -> strftime codes.
+_MOMENT_TOKENS = (("YYYY", "%Y"), ("MMM", "%b"), ("MM", "%m"), ("DD", "%d"), ("HH", "%H"), ("mm", "%M"), ("ss", "%S"))
+
+
+def _strftime_pattern(moment_format) -> str:
+    """strftime pattern for a simple moment.js format; DATETIME_FORMAT's
+    pattern for anything else."""
+    pattern = moment_format or DATETIME_FORMAT
+    for token, code in _MOMENT_TOKENS:
+        pattern = pattern.replace(token, code)
+    if re.search(r"[A-Za-z]", re.sub(r"%[A-Za-z]", "", pattern)):
+        return "%Y-%m-%d %H:%M"
+    return pattern
 
 
 def datetime_column(label: str, **kwargs):
