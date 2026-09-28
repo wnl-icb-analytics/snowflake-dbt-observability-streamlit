@@ -18,6 +18,9 @@ DEFAULT_LOOKBACK_DAYS = 7
 # Cache TTL (seconds) - mainly for UI rerender efficiency
 CACHE_TTL = 300
 
+# Runs page lists at most this many of the latest runs in the range
+RUNS_LIMIT = 1000
+
 # dbt runs in GitHub Actions in this repo; used for run, commit and issue links.
 DBT_REPO_URL = "https://github.com/wnl-icb-analytics/dbt-analytics"
 
@@ -38,8 +41,10 @@ JOB_SCHEDULES = {
 # as missing once this many hours have passed.
 JOB_GRACE_HOURS = 9
 # A scheduled run fills the earliest empty slot of its job in the preceding
-# 16 hours. Kept under the 19h gap between sdl-intraday's 12:00 and next 07:00
-# slots so a late run never fills the previous day's slot.
+# 16 hours; then a manual (workflow_dispatch) run of the job fills the earliest
+# slot still empty in its preceding 16 hours, e.g. a re-run of a missed build.
+# Kept under the 19h gap between sdl-intraday's 12:00 and next 07:00 slots so
+# a late run never fills the previous day's slot.
 JOB_SLOT_WINDOW_HOURS = 16
 
 # Thresholds

@@ -6,7 +6,7 @@ import streamlit as st
 
 from components import nav, ui
 from components.charts import top_models_bar_chart
-from components.formatting import format_duration, format_timestamp, to_datetime
+from components.formatting import format_duration, format_timestamp, is_missing, to_datetime
 from config import (
     SLOWDOWN_BASELINE_DAYS,
     SLOWDOWN_MIN_EXTRA_SECONDS,
@@ -24,11 +24,13 @@ def render():
     summary = get_runtime_summary(days)
     if not summary.empty:
         row = summary.iloc[0]
+        # SUM and AVG are NULL (NaN) when the range has no successful runs.
+        avg = row["AVG_EXECUTION_TIME"]
         ui.metric_row([
-            ("Total model time", format_duration(row["TOTAL_EXECUTION_TIME"] or 0) or "N/A"),
-            ("Model runs", f"{int(row['TOTAL_RUNS'] or 0):,}"),
-            ("Models run", f"{int(row['MODELS_RUN'] or 0):,}"),
-            ("Avg time per run", f"{row['AVG_EXECUTION_TIME'] or 0:.1f}s"),
+            ("Total model time", format_duration(row["TOTAL_EXECUTION_TIME"]) or "N/A"),
+            ("Model runs", f"{int(row['TOTAL_RUNS']):,}"),
+            ("Models run", f"{int(row['MODELS_RUN']):,}"),
+            ("Avg time per run", "N/A" if is_missing(avg) else f"{avg:.1f}s"),
         ])
 
     _render_slowdowns(days)

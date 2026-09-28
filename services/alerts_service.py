@@ -7,6 +7,7 @@ import json
 
 from database import run_query, search_clause
 from config import ELEMENTARY_SCHEMA, DEFAULT_LOOKBACK_DAYS
+from services.jobs_service import BUILT_TYPES
 
 
 def get_historical_test_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str = ""):
@@ -52,7 +53,7 @@ def get_historical_model_failures(days: int = DEFAULT_LOOKBACK_DAYS, search: str
     FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
     LEFT JOIN {ELEMENTARY_SCHEMA}.dbt_models m ON r.unique_id = m.unique_id
     WHERE r.generated_at >= DATEADD(day, -{days}, SYSDATE())
-    AND r.resource_type IN ('model', 'seed', 'snapshot')
+    AND r.resource_type IN {BUILT_TYPES}
     AND r.status IN ('fail', 'error')
     {search_filter}
     ORDER BY r.generated_at DESC
@@ -70,7 +71,7 @@ def get_historical_alert_counts(days: int = DEFAULT_LOOKBACK_DAYS):
          AND status IN ('fail', 'error', 'warn')) as failed_tests,
         (SELECT COUNT(*) FROM {ELEMENTARY_SCHEMA}.dbt_run_results
          WHERE generated_at >= DATEADD(day, -{days}, SYSDATE())
-         AND resource_type IN ('model', 'seed', 'snapshot')
+         AND resource_type IN {BUILT_TYPES}
          AND status IN ('fail', 'error')) as failed_models
     """
     return run_query(query)
@@ -117,7 +118,7 @@ def get_latest_run_issues():
             r.resource_type
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
         JOIN latest_invocation i ON r.invocation_id = i.invocation_id
-        WHERE r.resource_type IN ('model', 'seed', 'snapshot')
+        WHERE r.resource_type IN {BUILT_TYPES}
           AND r.status IN ('fail', 'error')
     ),
     test_issues AS (
@@ -170,7 +171,7 @@ def get_latest_build_summary():
             COUNT(*) as total_count
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
         JOIN latest_invocation i ON r.invocation_id = i.invocation_id
-        WHERE r.resource_type IN ('model', 'seed', 'snapshot')
+        WHERE r.resource_type IN {BUILT_TYPES}
     ),
     test_agg AS (
         SELECT
@@ -214,7 +215,7 @@ def get_downstream_skips(invocation_id: str):
         SELECT unique_id, status
         FROM {ELEMENTARY_SCHEMA}.dbt_run_results
         WHERE invocation_id = ?
-          AND resource_type IN ('model', 'seed', 'snapshot')
+          AND resource_type IN {BUILT_TYPES}
     ),
     errored AS (SELECT unique_id FROM run WHERE status IN ('error', 'fail')),
     skipped AS (SELECT unique_id FROM run WHERE status = 'skipped'),

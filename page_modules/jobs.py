@@ -57,7 +57,8 @@ def render():
     ui.metric_row([
         ("Scheduled runs", len(scheduled)),
         ("Missing runs", len(missing), {"help": f"Scheduled slots with no run {JOB_GRACE_HOURS}h later"}),
-        ("Failed job runs", int(github["FAILED"].sum()), {"help": "GitHub job runs with a failed model or test"}),
+        ("Failed job runs", int(github["FAILED"].sum()),
+         {"help": "GitHub job runs with a failed model, seed, snapshot or test"}),
         ("Median start delay", format_hours(median_delay) if pd.notna(median_delay) else "N/A",
          {"help": "Scheduled runs: dbt start time minus the cron time"}),
     ])
@@ -71,10 +72,12 @@ def _render_summary(summary: pd.DataFrame):
     """Per-job table; selecting a row picks the job shown in Job history."""
     st.subheader("Jobs")
     st.caption(
-        "Success = no failed model or test (warnings allowed). Delay = dbt start minus the scheduled time. "
-        f"A slot is missing when no scheduled run starts within {JOB_SLOT_WINDOW_HOURS}h of it "
-        f"and {JOB_GRACE_HOURS}h have passed; due slots are still inside that grace period. "
-        "Select a job to see its history below."
+        "Success = no failed model, seed, snapshot or test (warnings allowed). "
+        "Delay = dbt start minus the scheduled time, for scheduled runs. "
+        f"A slot is filled by a scheduled run of the job starting within {JOB_SLOT_WINDOW_HOURS}h after it, "
+        "else by a manual run of the job in that window (a re-run of a missed build). "
+        f"It is missing when no run has filled it and {JOB_GRACE_HOURS}h have passed; "
+        "due slots are still inside that grace period. Select a job to see its history below."
     )
     selected = ui.table(
         to_datetime(summary.copy(), "LAST_STARTED"),
@@ -154,7 +157,10 @@ def _render_history(runs: pd.DataFrame):
     }
     if is_scheduled:
         columns["SLOT"] = ui.datetime_column("Slot")
-        columns["DELAY_H"] = st.column_config.NumberColumn("Delay", format="%.1f h")
+        columns["FILLED_BY"] = st.column_config.TextColumn(
+            "Filled by", help="Schedule, or a manual run of this job when no scheduled run filled the slot",
+        )
+        columns["DELAY_H"] = st.column_config.NumberColumn("Delay", format="%.1f h", help="Scheduled runs only")
     columns["DURATION_MIN"] = st.column_config.NumberColumn("Duration", format="%.1f min")
     columns["TRIGGER_LABEL"] = "Trigger"
     if job in ("local", "manual", "other"):
@@ -211,4 +217,6 @@ def _trend_chart(df: pd.DataFrame, field: str, title: str, median):
             .mark_rule(strokeDash=[4, 4], color="#888")
             .encode(y="median:Q", tooltip=[alt.Tooltip("median:Q", title="Median", format=".1f")])
         )
-    st.altair_chart(alt.layer(*layers).properties(height=240, title=f"{title} · dashed line = median"))
+    # Title as markdown: an Altair title is clipped by the section above.
+    st.markdown(f"**{title}** · dashed line = median")
+    st.altair_chart(alt.layer(*layers).properties(height=240))

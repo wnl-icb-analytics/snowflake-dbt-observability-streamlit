@@ -17,10 +17,7 @@ from config import (
     STALE_MIN_BUILDS,
 )
 from database import run_query
-from services.jobs_service import job_columns_sql, trigger_sql
-
-# Resource types dbt builds as relations and reports in dbt_run_results.
-BUILT_TYPES = "('model', 'seed', 'snapshot')"
+from services.jobs_service import BUILT_TYPES, job_columns_sql, trigger_sql
 
 _CLOCK = "clock AS (SELECT COALESCE(TRY_TO_TIMESTAMP_NTZ(?), SYSDATE()) AS now_utc)"
 

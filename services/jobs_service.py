@@ -1,6 +1,7 @@
 """Jobs: which GitHub Actions job (or local run) produced each dbt invocation,
 invocations grouped into job runs, and schedule checks (start delay, missing
-runs) against config.JOB_SCHEDULES.
+runs) against config.JOB_SCHEDULES. Also the per-invocation status counts
+that decide a run's outcome, shared with the Runs and Home queries.
 
 Elementary's job_name/job_id are empty, so the job comes from the trigger
 (cause_category) and the dbt selection. All times are naive UTC
@@ -12,7 +13,7 @@ from datetime import timedelta
 
 import pandas as pd
 
-from components.formatting import to_local
+from components.formatting import run_failed, to_local
 from config import (
     DBT_REPO_URL,
     ELEMENTARY_SCHEMA,
@@ -112,6 +113,51 @@ def hide_compile_show_sql(alias: str = "i") -> str:
     return f"NOT (({job_type_sql(alias)}) = 'local' AND COALESCE({alias}.command, '') IN ('compile', 'show'))"
 
 
+# --- run counts (SQL) ----------------------------------------------------------
+
+# Resource types dbt builds as relations and reports in dbt_run_results.
+BUILT_TYPES = "('model', 'seed', 'snapshot')"
+
+
+def run_counts_sql(scope: str = "") -> str:
+    """CTEs run_stats (models, seeds and snapshots by status) and test_stats
+    (tests by status), one row per invocation_id. scope: optional
+    'JOIN <cte> ON <cte>.invocation_id = x.invocation_id' limiting the rows
+    read (x is the source alias). A run fails when either has a fail or error
+    (components.formatting.run_failed)."""
+    return f"""run_stats AS (
+        SELECT
+            x.invocation_id,
+            COUNT(*) AS models_run,
+            COUNT_IF(x.status = 'success') AS success_count,
+            COUNT_IF(x.status IN ('fail', 'error')) AS fail_count,
+            COUNT_IF(x.status = 'skipped') AS skipped_count
+        FROM {ELEMENTARY_SCHEMA}.dbt_run_results x
+        {scope}
+        WHERE x.resource_type IN {BUILT_TYPES}
+        GROUP BY x.invocation_id
+    ),
+    test_stats AS (
+        SELECT
+            x.invocation_id,
+            COUNT(*) AS tests_run,
+            COUNT_IF(x.status = 'pass') AS tests_passed,
+            COUNT_IF(x.status IN ('fail', 'error')) AS tests_failed,
+            COUNT_IF(x.status = 'warn') AS tests_warned
+        FROM {ELEMENTARY_SCHEMA}.elementary_test_results x
+        {scope}
+        GROUP BY x.invocation_id
+    )"""
+
+
+def run_counts_columns_sql() -> str:
+    """Select-list fragment with the run_counts_sql counts, 0 when none;
+    run_stats joined as s and test_stats as t."""
+    cols = [("s", c) for c in ("models_run", "success_count", "fail_count", "skipped_count")]
+    cols += [("t", c) for c in ("tests_run", "tests_passed", "tests_failed", "tests_warned")]
+    return ",\n        ".join(f"COALESCE({a}.{c}, 0) AS {c}" for a, c in cols)
+
+
 # --- GitHub links ----------------------------------------------------------------
 
 def commit_url(sha) -> str | None:
@@ -141,8 +187,9 @@ def run_links(row) -> list[tuple[str, str]]:
 
 def get_job_invocations(days: int):
     """Invocations started in the last days + 1 days (UTC) with job, trigger,
-    GitHub fields and model/test counts; local compile and show left out.
-    The extra day lets runs early in the range find their slots."""
+    GitHub fields and model (with seed and snapshot) and test counts; local
+    compile and show left out. The extra day lets runs early in the range find
+    their slots."""
     query = f"""
     WITH inv AS (
         SELECT
@@ -159,38 +206,11 @@ def get_job_invocations(days: int):
         WHERE TRY_TO_TIMESTAMP_NTZ(i.run_started_at) >= DATEADD(day, ?, SYSDATE())
           AND {hide_compile_show_sql()}
     ),
-    run_stats AS (
-        SELECT
-            r.invocation_id,
-            COUNT(*) AS models_run,
-            COUNT_IF(r.status = 'success') AS success_count,
-            COUNT_IF(r.status IN ('fail', 'error')) AS fail_count,
-            COUNT_IF(r.status = 'skipped') AS skipped_count
-        FROM {ELEMENTARY_SCHEMA}.dbt_run_results r
-        JOIN inv ON inv.invocation_id = r.invocation_id
-        WHERE r.resource_type = 'model'
-        GROUP BY r.invocation_id
-    ),
-    test_stats AS (
-        SELECT
-            t.invocation_id,
-            COUNT(*) AS tests_run,
-            COUNT_IF(t.status IN ('fail', 'error')) AS tests_failed,
-            COUNT_IF(t.status = 'warn') AS tests_warned
-        FROM {ELEMENTARY_SCHEMA}.elementary_test_results t
-        JOIN inv ON inv.invocation_id = t.invocation_id
-        GROUP BY t.invocation_id
-    )
+    {run_counts_sql("JOIN inv ON inv.invocation_id = x.invocation_id")}
     SELECT
         inv.*,
         TIMESTAMPDIFF('second', inv.started_at, inv.completed_at) AS duration_seconds,
-        COALESCE(s.models_run, 0) AS models_run,
-        COALESCE(s.success_count, 0) AS success_count,
-        COALESCE(s.fail_count, 0) AS fail_count,
-        COALESCE(s.skipped_count, 0) AS skipped_count,
-        COALESCE(t.tests_run, 0) AS tests_run,
-        COALESCE(t.tests_failed, 0) AS tests_failed,
-        COALESCE(t.tests_warned, 0) AS tests_warned
+        {run_counts_columns_sql()}
     FROM inv
     LEFT JOIN run_stats s ON s.invocation_id = inv.invocation_id
     LEFT JOIN test_stats t ON t.invocation_id = inv.invocation_id
@@ -221,7 +241,7 @@ def group_job_runs(inv: pd.DataFrame) -> pd.DataFrame:
     runs = runs.rename(columns={"INVOCATION_ID": "MAIN_INVOCATION_ID"})
     counts = ["FAIL_COUNT", "TESTS_FAILED", "TESTS_WARNED", "SKIPPED_COUNT", "SUCCESS_COUNT"]
     runs[counts] = runs[counts].fillna(0).astype(int)
-    runs["FAILED"] = (runs["FAIL_COUNT"] > 0) | (runs["TESTS_FAILED"] > 0)
+    runs["FAILED"] = [run_failed(row) for _, row in runs.iterrows()]
     runs["DURATION_MIN"] = pd.to_numeric(runs["DURATION_SECONDS"], errors="coerce") / 60
     return runs.sort_values("STARTED_AT", ascending=False).reset_index(drop=True)
 
@@ -271,30 +291,37 @@ def next_slot(job: str, after) -> pd.Timestamp | None:
 def job_report(days: int, now=None):
     """(runs, summary, missing) for the Jobs page.
 
-    runs: job runs started in the range; scheduled runs have SLOT and DELAY_H.
+    runs: job runs started in the range. Runs that filled a slot have SLOT and
+    FILLED_BY ('Schedule' or 'Manual run'); DELAY_H is set for scheduled ones.
     summary: one row per job (every scheduled job, plus others with runs).
-    missing: slots in the range with no scheduled run after JOB_GRACE_HOURS.
-    Only runs triggered by the schedule fill slots; manual runs do not."""
+    missing: slots in the range with no run after JOB_GRACE_HOURS.
+    Scheduled runs fill slots first; then manual runs of the job fill slots
+    still empty in the same window (a re-run of a missed build)."""
     now = utc_now() if now is None else pd.Timestamp(now)
     range_start = now - timedelta(days=days)
     grace = timedelta(hours=JOB_GRACE_HOURS)
 
     runs = group_job_runs(get_job_invocations(days))
     runs["SLOT"] = pd.Series(pd.NaT, index=runs.index, dtype="datetime64[ns]")
+    runs["FILLED_BY"] = pd.Series(None, index=runs.index, dtype=object)
     missing_rows, due = [], {}
     fetch_start = range_start - timedelta(days=1)
     for job in JOB_SCHEDULES:
-        slots = expected_slots(job, fetch_start, now)
-        scheduled = runs[(runs["JOB_TYPE"] == job) & (runs["TRIGGER_TYPE"] == "schedule")]
-        filled = match_slots(scheduled["STARTED_AT"], slots)
-        runs.loc[filled.index, "SLOT"] = filled
-        taken = set(filled.dropna())
-        empty = [s for s in slots if s not in taken]
+        empty = expected_slots(job, fetch_start, now)
+        for trigger, filled_by in (("schedule", "Schedule"), ("manual", "Manual run")):
+            candidates = runs[(runs["JOB_TYPE"] == job) & (runs["TRIGGER_TYPE"] == trigger)]
+            filled = match_slots(candidates["STARTED_AT"], empty).dropna()
+            runs.loc[filled.index, "SLOT"] = filled
+            runs.loc[filled.index, "FILLED_BY"] = filled_by
+            taken = set(filled)
+            empty = [s for s in empty if s not in taken]
         missing_rows += [{"JOB_TYPE": job, "SLOT": s} for s in empty if range_start <= s and s + grace <= now]
         waiting = [s for s in empty if s + grace > now]
         if waiting:
             due[job] = waiting[0]
-    runs["DELAY_H"] = (runs["STARTED_AT"] - runs["SLOT"]).dt.total_seconds() / 3600
+    # Start delay measures the scheduler, so only scheduled runs have one.
+    scheduled_fill = runs["FILLED_BY"] == "Schedule"
+    runs["DELAY_H"] = (runs["STARTED_AT"] - runs["SLOT"]).where(scheduled_fill).dt.total_seconds() / 3600
     runs = runs[runs["STARTED_AT"] >= range_start].reset_index(drop=True)
 
     missing = pd.DataFrame(missing_rows, columns=["JOB_TYPE", "SLOT"])

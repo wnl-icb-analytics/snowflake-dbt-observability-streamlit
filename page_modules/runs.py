@@ -5,6 +5,7 @@ import streamlit as st
 
 from components import nav, ui
 from components.formatting import run_status_label, to_datetime
+from config import RUNS_LIMIT
 from services.jobs_service import job_label, trigger_label
 from services.runs_service import get_invocations
 
@@ -63,10 +64,12 @@ def render():
     ui.page_header("Runs", f"dbt invocations in the last {days} days. Select a run to see its models, tests and timeline.")
 
     include = compile_show_control(key="runs_compile_show")
-    df = get_invocations(days=days, include_compile_show=include)
+    df = get_invocations(days=days, limit=RUNS_LIMIT, include_compile_show=include)
     if df.empty:
         ui.empty_state("No runs found in this time range")
         return
+    if len(df) >= RUNS_LIMIT:
+        st.caption(f"Showing the {RUNS_LIMIT:,} most recent runs.")
 
     selected = runs_table(df, key="runs_table", height=600, noun="runs")
     if selected is not None:
