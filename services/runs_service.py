@@ -75,6 +75,10 @@ def get_invocation_details(invocation_id: str):
         i.selected,
         i.dbt_version,
         i.job_url,
+        NULLIF(i.job_run_id, '') as job_run_id,
+        NULLIF(i.job_run_url, '') as job_run_url,
+        NULLIF(i.git_sha, '') as git_sha,
+        {job_columns_sql()},
         TRY_PARSE_JSON(i.target_adapter_specific_fields):warehouse::VARCHAR as warehouse,
         TIMESTAMPDIFF('second', TRY_TO_TIMESTAMP(i.run_started_at), TRY_TO_TIMESTAMP(i.run_completed_at)) as duration_seconds
     FROM {ELEMENTARY_SCHEMA}.dbt_invocations i
