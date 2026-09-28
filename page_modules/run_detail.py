@@ -30,7 +30,7 @@ def render(invocation_id: str):
         return
 
     details = details_df.iloc[0]
-    ui.page_header(f"Run {format_timestamp(details['CREATED_AT'])}", f"`{invocation_id}`")
+    ui.page_header(f"Run {format_timestamp(details['RUN_STARTED_AT'])}", f"`{invocation_id}`")
 
     meta = [
         details.get("COMMAND") or "dbt",
