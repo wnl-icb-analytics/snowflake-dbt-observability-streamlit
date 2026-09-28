@@ -8,6 +8,7 @@ from components import nav, ui
 from components.formatting import format_duration, format_timestamp, is_missing, status_label
 from components.issue_cards import render_model_error_card, render_test_issue_card
 from config import RUN_SHARE_TOP_N
+from page_modules.jobs import job_caption
 from services.alerts_service import get_downstream_skips
 from services.performance_service import (
     get_run_model_edges,
@@ -39,6 +40,7 @@ def render(invocation_id: str):
         f"dbt {details['DBT_VERSION']}" if details.get("DBT_VERSION") else "",
     ]
     st.caption(" · ".join(p for p in meta if p))
+    st.caption(job_caption(details))
     if details.get("SELECTED"):
         st.code(details["SELECTED"], language=None)
 
